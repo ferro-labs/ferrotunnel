@@ -272,6 +272,12 @@ For more complex setups, use the provided `docker-compose.yml`:
 docker-compose up --build
 ```
 
+## Examples
+
+Ready-to-run examples are maintained in a separate repository:
+
+**[https://github.com/ferro-labs/tunnel-examples](https://github.com/ferro-labs/tunnel-examples)**
+
 ## Documentation
 
 - [CLI Reference](ferrotunnel-cli/README.md)

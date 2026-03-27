@@ -42,13 +42,13 @@ Embeddable, extensible, and observable reverse tunnel for Rust developers.
   - Background connection eviction for resource efficiency
   - **Value**: Modern web baseline, enterprise credibility, improved performance
 
+- **v1.0.6** - gRPC Support ✅
+  - Native gRPC tunneling over HTTP/2 with automatic detection and trailer preservation
+  - **Target Audience**: Enterprise and microservices developers
+
 ### Planned
 
 > **Strategy**: Prioritize features that maximize user adoption and "time to first success"
-
-- **v1.0.6** - gRPC Support (in development)
-  - Native gRPC tunneling over HTTP/2 with automatic detection and trailer preservation
-  - **Target Audience**: Enterprise and microservices developers
 
 - **v1.0.7** - QUIC Transport (HTTP/3)
   - QUIC protocol support for reduced latency
