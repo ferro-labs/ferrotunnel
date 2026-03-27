@@ -14,7 +14,6 @@ members = [
     "tools/loadgen",
     "tools/soak",
     "tests",
-    "examples",
     "benches",
 ]
 
