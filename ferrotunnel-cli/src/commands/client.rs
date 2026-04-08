@@ -233,46 +233,25 @@ pub async fn run(args: ClientArgs) -> Result<()> {
                             .connect_and_run_quic(move |stream| {
                                 let local_addr = local_addr_config.clone();
                                 async move {
-                                    if stream.protocol() == Protocol::TCP {
-                                        tokio::spawn(async move {
-                                            match TcpStream::connect(&local_addr).await {
-                                                Ok(mut local_stream) => {
-                                                    let mut tunnel_stream = stream;
-                                                    let _ = tokio::io::copy_bidirectional(
-                                                        &mut tunnel_stream,
-                                                        &mut local_stream,
-                                                    )
-                                                    .await;
-                                                }
-                                                Err(e) => {
-                                                    error!(
-                                                        "Failed to connect to local TCP service {}: {}",
-                                                        local_addr, e
-                                                    );
-                                                }
+                                    // All QUIC streams forwarded via bidirectional copy
+                                    tokio::spawn(async move {
+                                        match TcpStream::connect(&local_addr).await {
+                                            Ok(mut local_stream) => {
+                                                let mut tunnel_stream = stream;
+                                                let _ = tokio::io::copy_bidirectional(
+                                                    &mut tunnel_stream,
+                                                    &mut local_stream,
+                                                )
+                                                .await;
                                             }
-                                        });
-                                    } else {
-                                        // For HTTP/gRPC over QUIC, use bidirectional copy to local service
-                                        tokio::spawn(async move {
-                                            match TcpStream::connect(&local_addr).await {
-                                                Ok(mut local_stream) => {
-                                                    let mut tunnel_stream = stream;
-                                                    let _ = tokio::io::copy_bidirectional(
-                                                        &mut tunnel_stream,
-                                                        &mut local_stream,
-                                                    )
-                                                    .await;
-                                                }
-                                                Err(e) => {
-                                                    error!(
-                                                        "Failed to connect to local service {}: {}",
-                                                        local_addr, e
-                                                    );
-                                                }
+                                            Err(e) => {
+                                                error!(
+                                                    "Failed to connect to local service {}: {}",
+                                                    local_addr, e
+                                                );
                                             }
-                                        });
-                                    }
+                                        }
+                                    });
                                 }
                             })
                             .await

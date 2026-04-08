@@ -9,15 +9,11 @@
 //! frame protocol.
 
 use ferrotunnel_common::{Result, TunnelError};
-use ferrotunnel_protocol::codec::TunnelCodec;
-use ferrotunnel_protocol::frame::{Frame, OpenStreamFrame, Protocol, StreamPriority};
-use futures::{SinkExt, StreamExt};
+use ferrotunnel_protocol::frame::{Protocol, StreamPriority};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::warn;
 
 /// A virtual stream backed by a QUIC bidirectional stream.
 ///
@@ -134,8 +130,8 @@ impl QuicMultiplexer {
 
     /// Open a new outbound data stream.
     ///
-    /// Opens a QUIC bidirectional stream and sends an `OpenStreamFrame` as the
-    /// first message so the remote side knows the protocol and stream ID.
+    /// Opens a QUIC bidirectional stream and writes a 6-byte binary header
+    /// so the remote side knows the protocol, priority, and stream ID.
     pub async fn open_stream(&self, protocol: Protocol) -> Result<QuicVirtualStream> {
         self.open_stream_with_priority(protocol, StreamPriority::default())
             .await
@@ -149,59 +145,43 @@ impl QuicMultiplexer {
     ) -> Result<QuicVirtualStream> {
         let stream_id = self.allocate_stream_id();
 
-        let (send, recv) = self.connection.open_bi().await.map_err(|e| {
+        let (mut send, recv) = self.connection.open_bi().await.map_err(|e| {
             TunnelError::Connection(format!("QUIC open_bi: {e}"))
         })?;
 
-        // Send OpenStreamFrame as the first message on this stream
-        let mut framed_send = FramedWrite::new(send, TunnelCodec::new());
-        framed_send
-            .send(Frame::OpenStream(Box::new(OpenStreamFrame {
-                stream_id,
-                protocol,
-                headers: vec![],
-                body_hint: None,
-                priority,
-            })))
-            .await?;
-
-        let send = framed_send.into_inner();
+        // Write a fixed-size 6-byte binary header instead of a framed codec
+        // to avoid FramedRead buffering that can silently drop stream data.
+        let mut header = [0u8; 6];
+        header[0] = protocol_to_u8(protocol);
+        header[1] = priority.as_u8();
+        header[2..6].copy_from_slice(&stream_id.to_be_bytes());
+        send.write_all(&header).await.map_err(|e| {
+            TunnelError::Connection(format!("QUIC write header: {e}"))
+        })?;
         Ok(QuicVirtualStream::new(stream_id, send, recv, protocol))
     }
 
     /// Accept an incoming data stream from the remote peer.
     ///
-    /// Reads the initial `OpenStreamFrame` to determine the protocol and stream ID.
+    /// Reads the 6-byte binary header to determine the protocol, priority, and stream ID.
     pub async fn accept_stream(&self) -> Result<QuicVirtualStream> {
-        let (send, recv) = self.connection.accept_bi().await.map_err(|e| {
+        let (send, mut recv) = self.connection.accept_bi().await.map_err(|e| {
             TunnelError::Connection(format!("QUIC accept_bi: {e}"))
         })?;
 
-        // Read the OpenStreamFrame from the first message
-        let mut framed_recv = FramedRead::new(recv, TunnelCodec::new());
-        let frame = framed_recv
-            .next()
-            .await
-            .ok_or_else(|| TunnelError::Protocol("QUIC stream closed before OpenStreamFrame".into()))?
-            .map_err(TunnelError::Io)?;
+        // Read the fixed-size 6-byte binary header directly to avoid
+        // FramedRead buffering that can silently drop stream data.
+        let mut header = [0u8; 6];
+        recv.read_exact(&mut header).await.map_err(|e| {
+            TunnelError::Connection(format!("QUIC read header: {e}"))
+        })?;
+        let protocol = u8_to_protocol(header[0]);
+        let priority = u8_to_priority(header[1]);
+        let stream_id = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
 
-        match frame {
-            Frame::OpenStream(open) => {
-                let recv = framed_recv.into_inner();
-                Ok(QuicVirtualStream::new(
-                    open.stream_id,
-                    send,
-                    recv,
-                    open.protocol,
-                ))
-            }
-            other => {
-                warn!("Expected OpenStreamFrame on QUIC stream, got {:?}", other);
-                Err(TunnelError::Protocol(
-                    "Expected OpenStreamFrame on QUIC data stream".into(),
-                ))
-            }
-        }
+        let _ = priority; // reserved for future QUIC priority support
+
+        Ok(QuicVirtualStream::new(stream_id, send, recv, protocol))
     }
 
     /// Get the underlying QUIC connection (for control channel setup).
@@ -212,5 +192,40 @@ impl QuicMultiplexer {
     /// Check if the connection is still alive.
     pub fn is_alive(&self) -> bool {
         self.connection.close_reason().is_none()
+    }
+}
+
+fn protocol_to_u8(p: Protocol) -> u8 {
+    match p {
+        Protocol::HTTP => 0,
+        Protocol::HTTPS => 1,
+        Protocol::HTTP2 => 2,
+        Protocol::WebSocket => 3,
+        Protocol::GRPC => 4,
+        Protocol::TCP => 5,
+        Protocol::QUIC => 6,
+    }
+}
+
+fn u8_to_protocol(v: u8) -> Protocol {
+    match v {
+        0 => Protocol::HTTP,
+        1 => Protocol::HTTPS,
+        2 => Protocol::HTTP2,
+        3 => Protocol::WebSocket,
+        4 => Protocol::GRPC,
+        5 => Protocol::TCP,
+        6 => Protocol::QUIC,
+        _ => Protocol::TCP, // fallback
+    }
+}
+
+fn u8_to_priority(v: u8) -> StreamPriority {
+    match v {
+        0 => StreamPriority::Normal,
+        1 => StreamPriority::Low,
+        2 => StreamPriority::High,
+        3 => StreamPriority::Critical,
+        _ => StreamPriority::Normal,
     }
 }

@@ -1,6 +1,6 @@
 use crate::auth::{constant_time_eq, validate_token_format};
 use crate::resource_limits::{ServerResourceLimits, SessionPermit};
-use crate::stream::{Multiplexer, PrioritizedFrame};
+use crate::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
 use crate::tunnel::common::clamp_u128_to_u64;
@@ -174,47 +174,14 @@ impl TunnelServer {
             let frame = result?;
             match frame {
                 Frame::Handshake(handshake) => {
-                    let HandshakeFrame {
-                        min_version,
-                        max_version,
-                        token,
-                        tunnel_id,
-                        capabilities,
-                    } = *handshake;
-                    if let Err(e) = validate_token_format(&token, 256) {
-                        warn!("Invalid token format from {}: {}", addr, e);
-                        framed
-                            .send(Frame::HandshakeAck {
-                                status: HandshakeStatus::InvalidToken,
-                                session_id: Uuid::nil(),
-                                version: 0,
-                                server_capabilities: vec![],
-                            })
-                            .await?;
-                        return Ok(());
-                    }
-
-                    if !constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
-                        warn!("Invalid token from {}", addr);
-                        framed
-                            .send(Frame::HandshakeAck {
-                                status: HandshakeStatus::InvalidToken,
-                                session_id: Uuid::nil(),
-                                version: 0,
-                                server_capabilities: vec![],
-                            })
-                            .await?;
-                        return Ok(());
-                    }
-
-                    // Version negotiation
-                    let negotiated_version = match negotiate_version(min_version, max_version) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!("Version negotiation failed for {}: {}", addr, e);
+                    let auth = match authenticate_handshake(
+                        *handshake, &expected_token, addr,
+                    ) {
+                        Ok(auth) => auth,
+                        Err(status) => {
                             framed
                                 .send(Frame::HandshakeAck {
-                                    status: HandshakeStatus::VersionMismatch,
+                                    status,
                                     session_id: Uuid::nil(),
                                     version: 0,
                                     server_capabilities: vec![],
@@ -224,16 +191,13 @@ impl TunnelServer {
                         }
                     };
 
-                    info!(
-                        "Client {} supports v{}-{}, negotiated v{}",
-                        addr, min_version, max_version, negotiated_version
-                    );
-
-                    // Success
-                    let session_id = Uuid::new_v4();
-
-                    // Determine tunnel ID: prefer requested, fallback to random session ID
-                    let tunnel_id = tunnel_id.unwrap_or_else(|| session_id.to_string());
+                    let AuthenticatedHandshake {
+                        session_id,
+                        tunnel_id,
+                        negotiated_version,
+                        token,
+                        capabilities,
+                    } = auth;
 
                     // Setup multiplexer with kanal channels
                     let parts = framed.into_parts();
@@ -266,7 +230,7 @@ impl TunnelServer {
                         addr,
                         token,
                         capabilities,
-                        Some(multiplexer.clone()),
+                        Some(AnyMultiplexer::Tcp(multiplexer.clone())),
                     );
 
                     if let Err(e) = sessions.add(session) {
@@ -523,17 +487,13 @@ impl TunnelServer {
                 // Create QUIC multiplexer for data streams
                 let quic_mux = QuicMultiplexer::new(connection.clone(), false);
 
-                // For the session, we store the TCP-compatible Multiplexer as None
-                // and use QuicMultiplexer via AnyMultiplexer for stream opening.
-                // However, the current Session struct stores Option<Multiplexer>.
-                // For now, we'll store None and handle QUIC sessions separately.
                 let session = Session::new(
                     session_id,
                     tunnel_id.clone(),
                     addr,
                     token,
                     capabilities,
-                    None,
+                    Some(AnyMultiplexer::Quic(quic_mux.clone())),
                 );
 
                 if let Err(e) = sessions.add(session) {
@@ -645,6 +605,65 @@ impl TunnelServer {
             }
         }
     }
+}
+
+/// Result of a successful handshake authentication.
+struct AuthenticatedHandshake {
+    session_id: Uuid,
+    tunnel_id: String,
+    negotiated_version: u8,
+    token: String,
+    capabilities: Vec<String>,
+}
+
+/// Validate and authenticate a handshake frame.
+/// Returns the authenticated handshake info, or a HandshakeStatus error.
+fn authenticate_handshake(
+    handshake: HandshakeFrame,
+    expected_token: &str,
+    addr: SocketAddr,
+) -> std::result::Result<AuthenticatedHandshake, HandshakeStatus> {
+    let HandshakeFrame {
+        min_version,
+        max_version,
+        token,
+        tunnel_id,
+        capabilities,
+    } = handshake;
+
+    if let Err(e) = validate_token_format(&token, 256) {
+        warn!("Invalid token format from {}: {}", addr, e);
+        return Err(HandshakeStatus::InvalidToken);
+    }
+
+    if !constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
+        warn!("Invalid token from {}", addr);
+        return Err(HandshakeStatus::InvalidToken);
+    }
+
+    let negotiated_version = match negotiate_version(min_version, max_version) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Version negotiation failed for {}: {}", addr, e);
+            return Err(HandshakeStatus::VersionMismatch);
+        }
+    };
+
+    info!(
+        "Client {} supports v{}-{}, negotiated v{}",
+        addr, min_version, max_version, negotiated_version
+    );
+
+    let session_id = Uuid::new_v4();
+    let tunnel_id = tunnel_id.unwrap_or_else(|| session_id.to_string());
+
+    Ok(AuthenticatedHandshake {
+        session_id,
+        tunnel_id,
+        negotiated_version,
+        token,
+        capabilities,
+    })
 }
 
 /// Negotiate protocol version between client and server

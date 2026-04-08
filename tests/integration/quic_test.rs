@@ -1,12 +1,11 @@
 //! QUIC transport integration tests
 
-use super::{generate_self_signed_cert, get_free_port, start_echo_server, TestConfig};
+use super::{generate_self_signed_cert, get_free_port, start_echo_server};
 use ferrotunnel_core::stream::QuicVirtualStream;
 use ferrotunnel_core::transport::quic::QuicTransportConfig;
 use ferrotunnel_core::transport::TransportConfig;
 use ferrotunnel_core::TunnelClient;
 use ferrotunnel_core::TunnelServer;
-use ferrotunnel_protocol::frame::Protocol;
 use std::io::Write;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -27,8 +26,9 @@ async fn wait_for_quic_server(
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         match ferrotunnel_core::transport::quic::connect(&addr.to_string(), &config).await {
-            Ok(conn) => {
+            Ok((endpoint, conn)) => {
                 conn.close(quinn::VarInt::from_u32(0), b"probe");
+                endpoint.wait_idle().await;
                 return true;
             }
             Err(_) => {
@@ -47,7 +47,6 @@ async fn test_quic_connection() {
         .ok();
 
     let quic_port = get_free_port();
-    let http_port = get_free_port();
     let local_port = get_free_port();
     let quic_addr: std::net::SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
     let token = "test-quic-token";

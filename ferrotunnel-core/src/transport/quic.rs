@@ -26,6 +26,7 @@ pub struct QuicTransportConfig {
     pub ca_cert_path: Option<String>,
     pub server_name: Option<String>,
     pub skip_verify: bool,
+    pub client_auth: bool,
     pub enable_0rtt: bool,
     pub max_idle_timeout: Duration,
     pub keep_alive_interval: Duration,
@@ -39,6 +40,7 @@ impl Default for QuicTransportConfig {
             ca_cert_path: None,
             server_name: None,
             skip_verify: false,
+            client_auth: false,
             enable_0rtt: false,
             max_idle_timeout: Duration::from_secs(DEFAULT_MAX_IDLE_TIMEOUT_SECS),
             keep_alive_interval: Duration::from_secs(DEFAULT_KEEP_ALIVE_INTERVAL_SECS),
@@ -70,6 +72,7 @@ impl QuicTransportConfig {
                 .map(|p| p.to_string_lossy().to_string()),
             server_name: config.server_name.clone(),
             skip_verify: config.skip_verify,
+            client_auth: false,
             enable_0rtt: config.enable_0rtt,
             max_idle_timeout: Duration::from_secs(
                 config
@@ -107,6 +110,7 @@ pub fn create_quinn_client_config(config: &QuicTransportConfig) -> io::Result<Cl
             .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("idle timeout: {e}")))?,
     ));
     transport.keep_alive_interval(Some(config.keep_alive_interval));
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(256));
 
     let mut client_config =
         ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(
@@ -126,7 +130,7 @@ pub fn create_quinn_server_config(config: &QuicTransportConfig) -> io::Result<Se
         cert_path: config.cert_path.clone(),
         key_path: config.key_path.clone(),
         server_name: config.server_name.clone(),
-        client_auth: false,
+        client_auth: config.client_auth,
         skip_verify: false,
     };
 
@@ -139,6 +143,7 @@ pub fn create_quinn_server_config(config: &QuicTransportConfig) -> io::Result<Se
             .try_into()
             .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("idle timeout: {e}")))?,
     ));
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(256));
 
     let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(
         rustls::ServerConfig::clone(&rustls_config),
@@ -171,10 +176,14 @@ pub fn create_server_endpoint(
 }
 
 /// Connect to a QUIC server.
+///
+/// Returns both the [`Endpoint`] and the [`quinn::Connection`]. The caller owns the
+/// endpoint lifecycle and should call `endpoint.wait_idle().await` after the session
+/// ends to ensure the underlying UDP socket is released.
 pub async fn connect(
     addr: &str,
     config: &QuicTransportConfig,
-) -> io::Result<quinn::Connection> {
+) -> io::Result<(Endpoint, quinn::Connection)> {
     let endpoint = create_client_endpoint(config)?;
 
     let socket_addr: SocketAddr = addr
@@ -195,6 +204,10 @@ pub async fn connect(
         io::Error::new(ErrorKind::InvalidInput, format!("invalid server name: {e}"))
     })?;
 
+    if config.enable_0rtt {
+        tracing::warn!("QUIC 0-RTT is not yet implemented; falling back to full handshake");
+    }
+
     let connection = endpoint
         .connect(socket_addr, &server_name)
         .map_err(|e| io::Error::new(ErrorKind::ConnectionRefused, format!("QUIC connect: {e}")))?
@@ -206,10 +219,13 @@ pub async fn connect(
             )
         })?;
 
-    Ok(connection)
+    Ok((endpoint, connection))
 }
 
 /// Accept a QUIC connection from the endpoint.
+///
+/// The caller owns the endpoint lifecycle and is responsible for closing it
+/// (e.g. via `endpoint.wait_idle().await`) when the server shuts down.
 pub async fn accept(endpoint: &Endpoint) -> io::Result<(quinn::Connection, SocketAddr)> {
     let incoming = endpoint
         .accept()

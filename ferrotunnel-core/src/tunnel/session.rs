@@ -1,5 +1,5 @@
 use crate::rate_limit::SessionRateLimiter;
-use crate::stream::Multiplexer;
+use crate::stream::AnyMultiplexer;
 use dashmap::DashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -24,7 +24,7 @@ pub struct Session {
     pub connected_at: Instant,
     pub last_heartbeat: Instant,
     pub capabilities: Vec<String>,
-    pub multiplexer: Option<Multiplexer>,
+    pub multiplexer: Option<AnyMultiplexer>,
     pub rate_limiter: Option<SessionRateLimiter>,
 }
 
@@ -35,7 +35,7 @@ impl Session {
         client_addr: SocketAddr,
         token: String,
         capabilities: Vec<String>,
-        multiplexer: Option<Multiplexer>,
+        multiplexer: Option<AnyMultiplexer>,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -182,7 +182,7 @@ impl SessionStore {
         count
     }
 
-    pub fn find_multiplexer(&self) -> Option<Multiplexer> {
+    pub fn find_multiplexer(&self) -> Option<AnyMultiplexer> {
         for r in self.sessions.iter() {
             if let Some(m) = &r.multiplexer {
                 return Some(m.clone());
@@ -192,7 +192,7 @@ impl SessionStore {
     }
 
     /// Find a multiplexer for a session that has the specified capability
-    pub fn find_multiplexer_with_capability(&self, capability: &str) -> Option<Multiplexer> {
+    pub fn find_multiplexer_with_capability(&self, capability: &str) -> Option<AnyMultiplexer> {
         for r in self.sessions.iter() {
             if r.capabilities.contains(&capability.to_string()) {
                 if let Some(m) = &r.multiplexer {
@@ -334,7 +334,7 @@ impl ShardedSessionStore {
     }
 
     /// Find any multiplexer (scans shards).
-    pub fn find_multiplexer(&self) -> Option<Multiplexer> {
+    pub fn find_multiplexer(&self) -> Option<AnyMultiplexer> {
         for (_, sessions) in &*self.shards {
             for r in sessions {
                 if let Some(m) = &r.multiplexer {
@@ -346,7 +346,7 @@ impl ShardedSessionStore {
     }
 
     /// Find a multiplexer for a session that has the specified capability.
-    pub fn find_multiplexer_with_capability(&self, capability: &str) -> Option<Multiplexer> {
+    pub fn find_multiplexer_with_capability(&self, capability: &str) -> Option<AnyMultiplexer> {
         for (_, sessions) in &*self.shards {
             for r in sessions {
                 if r.capabilities.contains(&capability.to_string()) {
@@ -425,7 +425,7 @@ impl SessionStoreBackend {
             SessionStoreBackend::Sharded(s) => s.cleanup_stale_sessions(timeout),
         }
     }
-    pub fn find_multiplexer_with_capability(&self, capability: &str) -> Option<Multiplexer> {
+    pub fn find_multiplexer_with_capability(&self, capability: &str) -> Option<AnyMultiplexer> {
         match self {
             SessionStoreBackend::Default(s) => s.find_multiplexer_with_capability(capability),
             SessionStoreBackend::Sharded(s) => s.find_multiplexer_with_capability(capability),

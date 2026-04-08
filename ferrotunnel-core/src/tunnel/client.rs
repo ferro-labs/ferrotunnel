@@ -199,7 +199,7 @@ impl TunnelClient {
             .map_err(|e| TunnelError::Authentication(format!("Invalid token: {e}")))?;
 
         info!("Connecting to {} via QUIC", self.server_addr);
-        let connection = quic::connect(&self.server_addr, &quic_config).await?;
+        let (endpoint, connection) = quic::connect(&self.server_addr, &quic_config).await?;
         info!("QUIC connected to {}", self.server_addr);
 
         // Open control stream (first bidi stream)
@@ -272,6 +272,10 @@ impl TunnelClient {
                 Err(TunnelError::Connection("Connection closed".into()))
             }
         };
+
+        // Close the endpoint and wait for the UDP socket to be released
+        endpoint.close(quinn::VarInt::from_u32(0), b"session ended");
+        endpoint.wait_idle().await;
 
         result
     }
