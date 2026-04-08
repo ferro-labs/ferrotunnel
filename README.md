@@ -18,13 +18,23 @@ FerroTunnel multiplexes streams over a single connection (like ngrok/Cloudflare 
 - **Cargo**: Required for building and installing from source.
 - **Git**: For cloning the repository during development.
 
-## Quick Start
+## Installation
 
-### CLI
+### Linux / macOS (recommended)
 
 ```bash
-# Install
+curl -fsSL https://tunnel.ferrolabs.ai/install.sh | bash
+```
+
+### Cargo
+
+```bash
 cargo install ferrotunnel-cli
+```
+
+## Quick Start
+
+```bash
 
 # Start server
 ferrotunnel server --token secret
