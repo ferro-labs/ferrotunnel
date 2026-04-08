@@ -189,9 +189,7 @@ impl TunnelClient {
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
-                return Err(TunnelError::Config(
-                    "QUIC transport config required".into(),
-                ));
+                return Err(TunnelError::Config("QUIC transport config required".into()));
             }
         };
 
@@ -203,12 +201,15 @@ impl TunnelClient {
         info!("QUIC connected to {}", self.server_addr);
 
         // Open control stream (first bidi stream)
-        let (ctrl_send, ctrl_recv) = connection.open_bi().await.map_err(|e| {
-            TunnelError::Connection(format!("QUIC open control stream: {e}"))
-        })?;
+        let (ctrl_send, ctrl_recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC open control stream: {e}")))?;
 
-        let mut ctrl_framed_send = tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
-        let mut ctrl_framed_recv = tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
+        let mut ctrl_framed_send =
+            tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
+        let mut ctrl_framed_recv =
+            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
 
         // Handshake
         ctrl_framed_send

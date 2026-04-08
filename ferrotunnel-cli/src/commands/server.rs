@@ -173,12 +173,18 @@ pub async fn run(args: ServerArgs) -> Result<()> {
             let quic_config = ferrotunnel_core::transport::quic::QuicTransportConfig {
                 cert_path: cert.to_string_lossy().to_string(),
                 key_path: key.to_string_lossy().to_string(),
-                ca_cert_path: args.tls_ca.as_ref().map(|p| p.to_string_lossy().to_string()),
+                ca_cert_path: args
+                    .tls_ca
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
                 ..Default::default()
             };
-            let quic_server = TunnelServer::new(args.bind, args.token.clone())
-                .with_transport(ferrotunnel_core::transport::TransportConfig::Quic(quic_config));
-            Some(tokio::spawn(async move { quic_server.run_quic(quic_addr).await }))
+            let quic_server = TunnelServer::new(args.bind, args.token.clone()).with_transport(
+                ferrotunnel_core::transport::TransportConfig::Quic(quic_config),
+            );
+            Some(tokio::spawn(async move {
+                quic_server.run_quic(quic_addr).await
+            }))
         } else {
             error!("QUIC requires TLS certificates. Provide --quic-cert/--quic-key or --tls-cert/--tls-key");
             None

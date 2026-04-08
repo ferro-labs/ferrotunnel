@@ -174,9 +174,7 @@ impl TunnelServer {
             let frame = result?;
             match frame {
                 Frame::Handshake(handshake) => {
-                    let auth = match authenticate_handshake(
-                        *handshake, &expected_token, addr,
-                    ) {
+                    let auth = match authenticate_handshake(*handshake, &expected_token, addr) {
                         Ok(auth) => auth,
                         Err(status) => {
                             framed
@@ -410,12 +408,15 @@ impl TunnelServer {
         _session_permit: SessionPermit,
     ) -> Result<()> {
         // Accept the control stream (first bidi stream opened by client)
-        let (ctrl_send, ctrl_recv) = connection.accept_bi().await.map_err(|e| {
-            TunnelError::Connection(format!("QUIC control stream accept: {e}"))
-        })?;
+        let (ctrl_send, ctrl_recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC control stream accept: {e}")))?;
 
-        let mut ctrl_framed_recv = tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
-        let mut ctrl_framed_send = tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
+        let mut ctrl_framed_recv =
+            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
+        let mut ctrl_framed_send =
+            tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
 
         // 1. Handshake on control stream
         let frame = ctrl_framed_recv
@@ -524,7 +525,9 @@ impl TunnelServer {
                 (session_id, tunnel_id, quic_mux)
             }
             _ => {
-                return Err(TunnelError::Protocol("Expected handshake on QUIC control stream".into()));
+                return Err(TunnelError::Protocol(
+                    "Expected handshake on QUIC control stream".into(),
+                ));
             }
         };
 
@@ -545,7 +548,10 @@ impl TunnelServer {
 
         // Cleanup
         sessions.remove(&session_id);
-        info!("QUIC client disconnected: {} (tunnel: {})", session_id, tunnel_id);
+        info!(
+            "QUIC client disconnected: {} (tunnel: {})",
+            session_id, tunnel_id
+        );
         ctrl_result
     }
 

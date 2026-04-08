@@ -371,7 +371,10 @@ async fn setup_dashboard(args: &ClientArgs, tunnel_id: uuid::Uuid) -> Arc<dyn St
 #[cfg(feature = "quic")]
 fn setup_quic_config(args: &ClientArgs) -> ferrotunnel_core::transport::quic::QuicTransportConfig {
     ferrotunnel_core::transport::quic::QuicTransportConfig {
-        ca_cert_path: args.tls_ca.as_ref().map(|p| p.to_string_lossy().to_string()),
+        ca_cert_path: args
+            .tls_ca
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
         cert_path: args
             .tls_cert
             .as_ref()

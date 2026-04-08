@@ -145,9 +145,11 @@ impl QuicMultiplexer {
     ) -> Result<QuicVirtualStream> {
         let stream_id = self.allocate_stream_id();
 
-        let (mut send, recv) = self.connection.open_bi().await.map_err(|e| {
-            TunnelError::Connection(format!("QUIC open_bi: {e}"))
-        })?;
+        let (mut send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC open_bi: {e}")))?;
 
         // Write a fixed-size 6-byte binary header instead of a framed codec
         // to avoid FramedRead buffering that can silently drop stream data.
@@ -155,9 +157,9 @@ impl QuicMultiplexer {
         header[0] = protocol_to_u8(protocol);
         header[1] = priority.as_u8();
         header[2..6].copy_from_slice(&stream_id.to_be_bytes());
-        send.write_all(&header).await.map_err(|e| {
-            TunnelError::Connection(format!("QUIC write header: {e}"))
-        })?;
+        send.write_all(&header)
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC write header: {e}")))?;
         Ok(QuicVirtualStream::new(stream_id, send, recv, protocol))
     }
 
@@ -165,16 +167,18 @@ impl QuicMultiplexer {
     ///
     /// Reads the 6-byte binary header to determine the protocol, priority, and stream ID.
     pub async fn accept_stream(&self) -> Result<QuicVirtualStream> {
-        let (send, mut recv) = self.connection.accept_bi().await.map_err(|e| {
-            TunnelError::Connection(format!("QUIC accept_bi: {e}"))
-        })?;
+        let (send, mut recv) = self
+            .connection
+            .accept_bi()
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC accept_bi: {e}")))?;
 
         // Read the fixed-size 6-byte binary header directly to avoid
         // FramedRead buffering that can silently drop stream data.
         let mut header = [0u8; 6];
-        recv.read_exact(&mut header).await.map_err(|e| {
-            TunnelError::Connection(format!("QUIC read header: {e}"))
-        })?;
+        recv.read_exact(&mut header)
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC read header: {e}")))?;
         let protocol = u8_to_protocol(header[0]);
         let priority = u8_to_priority(header[1]);
         let stream_id = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);

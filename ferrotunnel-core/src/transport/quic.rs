@@ -103,21 +103,18 @@ pub fn create_quinn_client_config(config: &QuicTransportConfig) -> io::Result<Cl
     let rustls_config = tls::create_client_config(&tls_config)?;
 
     let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(
-        config
-            .max_idle_timeout
-            .try_into()
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("idle timeout: {e}")))?,
-    ));
+    transport.max_idle_timeout(Some(config.max_idle_timeout.try_into().map_err(|e| {
+        io::Error::new(ErrorKind::InvalidInput, format!("idle timeout: {e}"))
+    })?));
     transport.keep_alive_interval(Some(config.keep_alive_interval));
     transport.max_concurrent_bidi_streams(VarInt::from_u32(256));
 
-    let mut client_config =
-        ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(
-            rustls::ClientConfig::clone(&rustls_config),
-        ).map_err(|e| {
-            io::Error::new(ErrorKind::InvalidData, format!("QUIC client config: {e}"))
-        })?));
+    let mut client_config = ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(rustls::ClientConfig::clone(
+            &rustls_config,
+        ))
+        .map_err(|e| io::Error::new(ErrorKind::InvalidData, format!("QUIC client config: {e}")))?,
+    ));
     client_config.transport_config(Arc::new(transport));
 
     Ok(client_config)
@@ -137,12 +134,9 @@ pub fn create_quinn_server_config(config: &QuicTransportConfig) -> io::Result<Se
     let rustls_config = tls::create_server_config(&tls_config)?;
 
     let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(
-        config
-            .max_idle_timeout
-            .try_into()
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("idle timeout: {e}")))?,
-    ));
+    transport.max_idle_timeout(Some(config.max_idle_timeout.try_into().map_err(|e| {
+        io::Error::new(ErrorKind::InvalidInput, format!("idle timeout: {e}"))
+    })?));
     transport.max_concurrent_bidi_streams(VarInt::from_u32(256));
 
     let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(
@@ -159,9 +153,11 @@ pub fn create_quinn_server_config(config: &QuicTransportConfig) -> io::Result<Se
 /// Create a client endpoint bound to an ephemeral UDP port.
 pub fn create_client_endpoint(config: &QuicTransportConfig) -> io::Result<Endpoint> {
     let client_config = create_quinn_client_config(config)?;
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().map_err(|e| {
-        io::Error::new(ErrorKind::InvalidInput, format!("bind address: {e}"))
-    })?)?;
+    let mut endpoint = Endpoint::client(
+        "0.0.0.0:0"
+            .parse()
+            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("bind address: {e}")))?,
+    )?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }
@@ -193,10 +189,7 @@ pub async fn connect(
     let server_name = if let Some(name) = &config.server_name {
         name.clone()
     } else {
-        addr.split(':')
-            .next()
-            .unwrap_or("localhost")
-            .to_string()
+        addr.split(':').next().unwrap_or("localhost").to_string()
     };
 
     // Validate server name
@@ -213,10 +206,7 @@ pub async fn connect(
         .map_err(|e| io::Error::new(ErrorKind::ConnectionRefused, format!("QUIC connect: {e}")))?
         .await
         .map_err(|e| {
-            io::Error::new(
-                ErrorKind::ConnectionRefused,
-                format!("QUIC handshake: {e}"),
-            )
+            io::Error::new(ErrorKind::ConnectionRefused, format!("QUIC handshake: {e}"))
         })?;
 
     Ok((endpoint, connection))
@@ -234,12 +224,9 @@ pub async fn accept(endpoint: &Endpoint) -> io::Result<(quinn::Connection, Socke
 
     let addr = incoming.remote_address();
 
-    let connection = incoming.await.map_err(|e| {
-        io::Error::new(
-            ErrorKind::ConnectionRefused,
-            format!("QUIC accept: {e}"),
-        )
-    })?;
+    let connection = incoming
+        .await
+        .map_err(|e| io::Error::new(ErrorKind::ConnectionRefused, format!("QUIC accept: {e}")))?;
 
     Ok((connection, addr))
 }

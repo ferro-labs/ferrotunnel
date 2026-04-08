@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Pre-push hook: run tests before pushing
+set -e
+
+echo "🧪 pre-push: running tests..."
+cargo test --workspace --all-features
+if [ $? -ne 0 ]; then
+    echo "❌ Tests failed. Fix before pushing."
+    exit 1
+fi
+
+echo "✅ pre-push: all tests passed"
