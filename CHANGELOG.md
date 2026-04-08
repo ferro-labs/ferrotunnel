@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Builder API**: Added `.quic(&QuicConfig)` method on both `ServerBuilder` and `ClientBuilder`
 - **CLI flags** (gated behind `--features quic`):
   - Server: `--quic-bind`, `--quic-cert`, `--quic-key`
-  - Client: `--quic`, `--quic-0rtt`
+  - Client: `--quic`, `--quic-0rtt` (`--quic-0rtt` currently falls back to a full handshake)
 - **`Protocol::QUIC`**: New variant in the protocol enum
 - **Integration test**: `test_quic_connection` verifying end-to-end QUIC handshake
 

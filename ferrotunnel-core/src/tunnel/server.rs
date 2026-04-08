@@ -63,6 +63,13 @@ impl TunnelServer {
         self
     }
 
+    /// Reuse an existing session backend so multiple listeners share tunnel state.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: SessionStoreBackend) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
     /// Configure TLS for the server using certificate and key files.
     #[must_use]
     pub fn with_tls(
@@ -427,47 +434,12 @@ impl TunnelServer {
 
         let (session_id, tunnel_id, multiplexer) = match frame {
             Frame::Handshake(handshake) => {
-                let HandshakeFrame {
-                    min_version,
-                    max_version,
-                    token,
-                    tunnel_id,
-                    capabilities,
-                } = *handshake;
-
-                if let Err(e) = validate_token_format(&token, 256) {
-                    warn!("Invalid token format from QUIC {}: {}", addr, e);
-                    ctrl_framed_send
-                        .send(Frame::HandshakeAck {
-                            status: HandshakeStatus::InvalidToken,
-                            session_id: Uuid::nil(),
-                            version: 0,
-                            server_capabilities: vec![],
-                        })
-                        .await?;
-                    return Ok(());
-                }
-
-                if !constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
-                    warn!("Invalid token from QUIC {}", addr);
-                    ctrl_framed_send
-                        .send(Frame::HandshakeAck {
-                            status: HandshakeStatus::InvalidToken,
-                            session_id: Uuid::nil(),
-                            version: 0,
-                            server_capabilities: vec![],
-                        })
-                        .await?;
-                    return Ok(());
-                }
-
-                let negotiated_version = match negotiate_version(min_version, max_version) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("Version negotiation failed for QUIC {}: {}", addr, e);
+                let auth = match authenticate_handshake(*handshake, &expected_token, addr) {
+                    Ok(auth) => auth,
+                    Err(status) => {
                         ctrl_framed_send
                             .send(Frame::HandshakeAck {
-                                status: HandshakeStatus::VersionMismatch,
+                                status,
                                 session_id: Uuid::nil(),
                                 version: 0,
                                 server_capabilities: vec![],
@@ -477,13 +449,13 @@ impl TunnelServer {
                     }
                 };
 
-                info!(
-                    "QUIC client {} supports v{}-{}, negotiated v{}",
-                    addr, min_version, max_version, negotiated_version
-                );
-
-                let session_id = Uuid::new_v4();
-                let tunnel_id = tunnel_id.unwrap_or_else(|| session_id.to_string());
+                let AuthenticatedHandshake {
+                    session_id,
+                    tunnel_id,
+                    negotiated_version,
+                    token,
+                    capabilities,
+                } = auth;
 
                 // Create QUIC multiplexer for data streams
                 let quic_mux = QuicMultiplexer::new(connection.clone(), false);

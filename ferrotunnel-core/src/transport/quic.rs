@@ -182,15 +182,13 @@ pub async fn connect(
 ) -> io::Result<(Endpoint, quinn::Connection)> {
     let endpoint = create_client_endpoint(config)?;
 
-    let socket_addr: SocketAddr = addr
-        .parse()
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("invalid address: {e}")))?;
+    let (host, port) = split_host_port(addr)?;
+    let socket_addr = tokio::net::lookup_host((host.as_str(), port))
+        .await?
+        .next()
+        .ok_or_else(|| io::Error::new(ErrorKind::AddrNotAvailable, "address resolution failed"))?;
 
-    let server_name = if let Some(name) = &config.server_name {
-        name.clone()
-    } else {
-        addr.split(':').next().unwrap_or("localhost").to_string()
-    };
+    let server_name = config.server_name.clone().unwrap_or(host);
 
     // Validate server name
     let _: ServerName<'_> = ServerName::try_from(server_name.as_str()).map_err(|e| {
@@ -210,6 +208,42 @@ pub async fn connect(
         })?;
 
     Ok((endpoint, connection))
+}
+
+fn split_host_port(addr: &str) -> io::Result<(String, u16)> {
+    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+        return Ok((socket_addr.ip().to_string(), socket_addr.port()));
+    }
+
+    if let Some(rest) = addr.strip_prefix('[') {
+        let Some((host, port_str)) = rest.split_once("]:") else {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid bracketed address: {addr}"),
+            ));
+        };
+        let port = port_str.parse::<u16>().map_err(|e| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid port in address: {e}"),
+            )
+        })?;
+        return Ok((host.to_string(), port));
+    }
+
+    let Some((host, port_str)) = addr.rsplit_once(':') else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("missing port in address: {addr}"),
+        ));
+    };
+    let port = port_str.parse::<u16>().map_err(|e| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid port in address: {e}"),
+        )
+    })?;
+    Ok((host.to_string(), port))
 }
 
 /// Accept a QUIC connection from the endpoint.

@@ -179,9 +179,11 @@ pub async fn run(args: ServerArgs) -> Result<()> {
                     .map(|p| p.to_string_lossy().to_string()),
                 ..Default::default()
             };
-            let quic_server = TunnelServer::new(args.bind, args.token.clone()).with_transport(
-                ferrotunnel_core::transport::TransportConfig::Quic(quic_config),
-            );
+            let quic_server = TunnelServer::new(args.bind, args.token.clone())
+                .with_transport(ferrotunnel_core::transport::TransportConfig::Quic(
+                    quic_config,
+                ))
+                .with_sessions(sessions.clone());
             Some(tokio::spawn(async move {
                 quic_server.run_quic(quic_addr).await
             }))

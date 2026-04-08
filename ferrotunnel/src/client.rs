@@ -27,6 +27,7 @@ use ferrotunnel_http::HttpProxy;
 use ferrotunnel_protocol::frame::Protocol;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -100,7 +101,7 @@ impl Client {
         let info_tx = Arc::new(std::sync::Mutex::new(Some(info_tx)));
 
         let task = tokio::spawn(async move {
-            let proxy = Arc::new(HttpProxy::new(local_addr));
+            let proxy = Arc::new(HttpProxy::new(local_addr.clone()));
             let mut shutdown_rx = shutdown_rx;
 
             loop {
@@ -109,30 +110,76 @@ impl Client {
                 if let Some(ref id) = tunnel_id {
                     client = client.with_tunnel_id(id.clone());
                 }
+                let selected_transport = transport_config.clone();
                 let proxy_ref = proxy.clone();
+                let local_addr_ref = local_addr.clone();
                 let info_tx = info_tx.clone();
 
                 let connect_result = tokio::select! {
-                    result = client.connect_and_run_with_callback(move |stream| {
-                        let proxy = proxy_ref.clone();
-                        async move {
-                            if stream.protocol() == Protocol::GRPC {
-                                proxy.handle_grpc_stream(stream);
-                            } else {
-                                proxy.handle_stream(stream);
+                    result = async move {
+                        match &selected_transport {
+                            #[cfg(feature = "quic")]
+                            TransportConfig::Quic(_) => {
+                                client.connect_and_run_quic_with_callback(
+                                    move |stream| {
+                                        let local_addr = local_addr_ref.clone();
+                                        async move {
+                                            tokio::spawn(async move {
+                                                match TcpStream::connect(&local_addr).await {
+                                                    Ok(mut local_stream) => {
+                                                        let mut tunnel_stream = stream;
+                                                        let _ = tokio::io::copy_bidirectional(
+                                                            &mut tunnel_stream,
+                                                            &mut local_stream,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    Err(e) => {
+                                                        error!(
+                                                            "Failed to connect to local service {}: {}",
+                                                            local_addr, e
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    },
+                                    move |session_id| {
+                                        if let Ok(mut lock) = info_tx.lock() {
+                                            if let Some(tx) = lock.take() {
+                                                let _ = tx.send(TunnelInfo {
+                                                    session_id: Some(session_id),
+                                                    public_url: None,
+                                                });
+                                            }
+                                        }
+                                    },
+                                ).await
+                            }
+                            _ => {
+                                client.connect_and_run_with_callback(move |stream| {
+                                    let proxy = proxy_ref.clone();
+                                    async move {
+                                        if stream.protocol() == Protocol::GRPC {
+                                            proxy.handle_grpc_stream(stream);
+                                        } else {
+                                            proxy.handle_stream(stream);
+                                        }
+                                    }
+                                }, move |session_id| {
+                                    // Send connection info on successful handshake (only once)
+                                    if let Ok(mut lock) = info_tx.lock() {
+                                        if let Some(tx) = lock.take() {
+                                            let _ = tx.send(TunnelInfo {
+                                                session_id: Some(session_id),
+                                                public_url: None,
+                                            });
+                                        }
+                                    }
+                                }).await
                             }
                         }
-                    }, move |session_id| {
-                        // Send connection info on successful handshake (only once)
-                        if let Ok(mut lock) = info_tx.lock() {
-                            if let Some(tx) = lock.take() {
-                                let _ = tx.send(TunnelInfo {
-                                    session_id: Some(session_id),
-                                    public_url: None,
-                                });
-                            }
-                        }
-                    }) => result,
+                    } => result,
                     _ = shutdown_rx.changed() => {
                         info!("Client shutdown requested");
                         break;

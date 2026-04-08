@@ -1,6 +1,8 @@
 //! QUIC transport integration tests
 
-use super::{generate_self_signed_cert, get_free_port, start_echo_server};
+use super::{generate_self_signed_cert, get_free_port, make_client, start_echo_server};
+use ferrotunnel::{Client, Server};
+use ferrotunnel_common::QuicConfig;
 use ferrotunnel_core::stream::QuicVirtualStream;
 use ferrotunnel_core::transport::quic::QuicTransportConfig;
 use ferrotunnel_core::transport::TransportConfig;
@@ -161,5 +163,105 @@ async fn test_quic_connection() {
 
     // Abort client (cleanup)
     client_handle.abort();
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+/// Test the public builder APIs over QUIC with HTTP ingress routing.
+#[tokio::test]
+async fn test_public_api_quic_routing() {
+    let _ = rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
+    let quic_port = get_free_port();
+    let http_port = get_free_port();
+    let local_port = get_free_port();
+    let quic_addr: std::net::SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
+    let http_addr: std::net::SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
+    let token = "test-public-quic-token";
+    let tunnel_id = "test-public-quic";
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ferrotunnel_test_public_quic_{}",
+        uuid::Uuid::new_v4()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let (cert_pem, key_pem) =
+        generate_self_signed_cert(vec!["localhost".to_string(), "127.0.0.1".to_string()]);
+
+    let cert_path = temp_dir.join("server.crt");
+    let key_path = temp_dir.join("server.key");
+
+    std::fs::File::create(&cert_path)
+        .unwrap()
+        .write_all(cert_pem.as_bytes())
+        .unwrap();
+    std::fs::File::create(&key_path)
+        .unwrap()
+        .write_all(key_pem.as_bytes())
+        .unwrap();
+
+    let _echo = start_echo_server(format!("127.0.0.1:{local_port}").parse().unwrap()).await;
+
+    let server_quic = QuicConfig {
+        enabled: true,
+        cert_path: Some(cert_path.clone()),
+        key_path: Some(key_path.clone()),
+        ..Default::default()
+    };
+
+    let mut server = Server::builder()
+        .bind(quic_addr)
+        .http_bind(http_addr)
+        .token(token)
+        .quic(&server_quic)
+        .build()
+        .expect("Failed to build QUIC server");
+
+    let server_handle = tokio::spawn(async move { server.start().await });
+
+    assert!(
+        wait_for_quic_server(quic_addr, &cert_path, Duration::from_secs(5)).await,
+        "QUIC server did not start in time"
+    );
+
+    let client_quic = QuicConfig {
+        enabled: true,
+        ca_cert_path: Some(cert_path.clone()),
+        server_name: Some("localhost".to_string()),
+        skip_verify: true,
+        ..Default::default()
+    };
+
+    let mut client = Client::builder()
+        .server_addr(quic_addr.to_string())
+        .token(token)
+        .local_addr(format!("127.0.0.1:{local_port}"))
+        .tunnel_id(tunnel_id)
+        .quic(&client_quic)
+        .build()
+        .expect("Failed to build QUIC client");
+
+    client
+        .start()
+        .await
+        .expect("Client failed to connect over QUIC");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let response = make_client()
+        .get(format!("http://{http_addr}/"))
+        .header("Host", tunnel_id)
+        .send()
+        .await
+        .expect("Failed to send HTTP request through QUIC tunnel");
+
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.expect("Failed to read response body");
+    assert!(text.contains("Hello, World!"));
+
+    let _ = client.shutdown().await;
+    server_handle.abort();
     let _ = std::fs::remove_dir_all(temp_dir);
 }

@@ -149,7 +149,7 @@ FerroTunnel v1.0.7+ supports QUIC as an alternative transport for the tunnel con
 # Build with QUIC support
 cargo build --features quic
 
-# Server: listen on both TCP and QUIC
+# Server: keep the TCP control plane on :7835 and add a shared-state QUIC listener on :7836
 ferrotunnel server --token secret --quic-bind 0.0.0.0:7836 --tls-cert server.crt --tls-key server.key
 
 # Client: connect via QUIC
@@ -188,7 +188,7 @@ async fn main() -> ferrotunnel::Result<()> {
 **Key benefits**:
 - No head-of-line blocking — each tunnel stream uses a native QUIC stream
 - Built-in TLS 1.3 encryption (mandatory in QUIC)
-- 0-RTT reconnection support (`--quic-0rtt` flag)
+- `--quic-0rtt` is reserved for future 0-RTT support; current clients fall back to a full handshake
 - UDP-based — works better on lossy networks
 
 ## Features
