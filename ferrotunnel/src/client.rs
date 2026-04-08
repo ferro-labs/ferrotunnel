@@ -25,12 +25,16 @@ use ferrotunnel_core::transport::{tls::TlsTransportConfig, TransportConfig};
 use ferrotunnel_core::TunnelClient;
 use ferrotunnel_http::HttpProxy;
 use ferrotunnel_protocol::frame::Protocol;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
+use uuid::Uuid;
+
+type StreamDispatch = Arc<dyn Fn(ferrotunnel_core::stream::VirtualStream) + Send + Sync>;
+type TunnelInfoTx = Arc<Mutex<Option<oneshot::Sender<TunnelInfo>>>>;
 
 /// A tunnel client that can be embedded in your application.
 ///
@@ -98,10 +102,17 @@ impl Client {
         let reconnect_delay = config.reconnect_delay;
         let transport_config = self.transport_config.clone();
 
-        let info_tx = Arc::new(std::sync::Mutex::new(Some(info_tx)));
+        let info_tx = Arc::new(Mutex::new(Some(info_tx)));
 
         let task = tokio::spawn(async move {
             let proxy = Arc::new(HttpProxy::new(local_addr.clone()));
+            let proxy_dispatch: StreamDispatch = Arc::new(move |stream| {
+                if stream.protocol() == Protocol::GRPC {
+                    proxy.handle_grpc_stream(stream);
+                } else {
+                    proxy.handle_stream(stream);
+                }
+            });
             let mut shutdown_rx = shutdown_rx;
 
             loop {
@@ -110,76 +121,14 @@ impl Client {
                 if let Some(ref id) = tunnel_id {
                     client = client.with_tunnel_id(id.clone());
                 }
-                let selected_transport = transport_config.clone();
-                let proxy_ref = proxy.clone();
-                let local_addr_ref = local_addr.clone();
-                let info_tx = info_tx.clone();
-
                 let connect_result = tokio::select! {
-                    result = async move {
-                        match &selected_transport {
-                            #[cfg(feature = "quic")]
-                            TransportConfig::Quic(_) => {
-                                client.connect_and_run_quic_with_callback(
-                                    move |stream| {
-                                        let local_addr = local_addr_ref.clone();
-                                        async move {
-                                            tokio::spawn(async move {
-                                                match TcpStream::connect(&local_addr).await {
-                                                    Ok(mut local_stream) => {
-                                                        let mut tunnel_stream = stream;
-                                                        let _ = tokio::io::copy_bidirectional(
-                                                            &mut tunnel_stream,
-                                                            &mut local_stream,
-                                                        )
-                                                        .await;
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                            "Failed to connect to local service {}: {}",
-                                                            local_addr, e
-                                                        );
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    },
-                                    move |session_id| {
-                                        if let Ok(mut lock) = info_tx.lock() {
-                                            if let Some(tx) = lock.take() {
-                                                let _ = tx.send(TunnelInfo {
-                                                    session_id: Some(session_id),
-                                                    public_url: None,
-                                                });
-                                            }
-                                        }
-                                    },
-                                ).await
-                            }
-                            _ => {
-                                client.connect_and_run_with_callback(move |stream| {
-                                    let proxy = proxy_ref.clone();
-                                    async move {
-                                        if stream.protocol() == Protocol::GRPC {
-                                            proxy.handle_grpc_stream(stream);
-                                        } else {
-                                            proxy.handle_stream(stream);
-                                        }
-                                    }
-                                }, move |session_id| {
-                                    // Send connection info on successful handshake (only once)
-                                    if let Ok(mut lock) = info_tx.lock() {
-                                        if let Some(tx) = lock.take() {
-                                            let _ = tx.send(TunnelInfo {
-                                                session_id: Some(session_id),
-                                                public_url: None,
-                                            });
-                                        }
-                                    }
-                                }).await
-                            }
-                        }
-                    } => result,
+                    result = Self::connect_once(
+                        client,
+                        transport_config.clone(),
+                        proxy_dispatch.clone(),
+                        local_addr.clone(),
+                        info_tx.clone(),
+                    ) => result,
                     _ = shutdown_rx.changed() => {
                         info!("Client shutdown requested");
                         break;
@@ -209,6 +158,71 @@ impl Client {
         info_rx
             .await
             .map_err(|_| TunnelError::Connection("Failed to establish connection".into()))
+    }
+
+    async fn connect_once(
+        mut client: TunnelClient,
+        transport_config: TransportConfig,
+        proxy_dispatch: StreamDispatch,
+        local_addr: String,
+        info_tx: TunnelInfoTx,
+    ) -> Result<()> {
+        match transport_config {
+            #[cfg(feature = "quic")]
+            TransportConfig::Quic(_) => {
+                client
+                    .connect_and_run_quic_with_callback(
+                        move |stream| {
+                            let local_addr = local_addr.clone();
+                            async move {
+                                Self::spawn_quic_bridge(local_addr, stream);
+                            }
+                        },
+                        move |session_id| Self::publish_tunnel_info(&info_tx, session_id),
+                    )
+                    .await
+            }
+            _ => {
+                client
+                    .connect_and_run_with_callback(
+                        move |stream| {
+                            let proxy_dispatch = proxy_dispatch.clone();
+                            async move {
+                                proxy_dispatch(stream);
+                            }
+                        },
+                        move |session_id| Self::publish_tunnel_info(&info_tx, session_id),
+                    )
+                    .await
+            }
+        }
+    }
+
+    fn publish_tunnel_info(info_tx: &TunnelInfoTx, session_id: Uuid) {
+        if let Ok(mut lock) = info_tx.lock() {
+            if let Some(tx) = lock.take() {
+                let _ = tx.send(TunnelInfo {
+                    session_id: Some(session_id),
+                    public_url: None,
+                });
+            }
+        }
+    }
+
+    #[cfg(feature = "quic")]
+    fn spawn_quic_bridge(local_addr: String, stream: ferrotunnel_core::stream::QuicVirtualStream) {
+        tokio::spawn(async move {
+            match TcpStream::connect(&local_addr).await {
+                Ok(mut local_stream) => {
+                    let mut tunnel_stream = stream;
+                    let _ =
+                        tokio::io::copy_bidirectional(&mut tunnel_stream, &mut local_stream).await;
+                }
+                Err(e) => {
+                    error!("Failed to connect to local service {}: {}", local_addr, e);
+                }
+            }
+        });
     }
 
     /// Shutdown the tunnel client and wait for cleanup.
