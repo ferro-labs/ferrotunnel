@@ -275,6 +275,22 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure QUIC transport for the client.
+    ///
+    /// When enabled, the client will connect to the server using QUIC.
+    /// QUIC provides built-in encryption, native stream multiplexing,
+    /// and optional 0-RTT reconnection.
+    #[cfg(feature = "quic")]
+    #[must_use]
+    pub fn quic(mut self, config: &ferrotunnel_common::QuicConfig) -> Self {
+        if let Some(quic) =
+            ferrotunnel_core::transport::quic::QuicTransportConfig::from_common(config)
+        {
+            self.transport_config = Some(TransportConfig::Quic(quic));
+        }
+        self
+    }
+
     /// Build the client with the configured options.
     ///
     /// # Errors

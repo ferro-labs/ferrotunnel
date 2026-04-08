@@ -42,6 +42,11 @@ ferrotunnel server --token my-secret-token
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | TLS private key file path |
 | `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate for client auth |
 | `--tls-client-auth` | `FERROTUNNEL_TLS_CLIENT_AUTH` | `false` | Require client certificates |
+| `--quic-bind`* | `FERROTUNNEL_QUIC_BIND` | - | QUIC endpoint address (UDP) |
+| `--quic-cert`* | `FERROTUNNEL_QUIC_CERT` | - | TLS cert for QUIC (falls back to `--tls-cert`) |
+| `--quic-key`* | `FERROTUNNEL_QUIC_KEY` | - | TLS key for QUIC (falls back to `--tls-key`) |
+
+*\* Requires `--features quic` at build time.*
 
 ### Client
 
@@ -79,6 +84,10 @@ ferrotunnel client --server tunnel.example.com:7835
 | `--tls-server-name` | `FERROTUNNEL_TLS_SERVER_NAME` | - | SNI hostname |
 | `--tls-cert` | `FERROTUNNEL_TLS_CERT` | - | Client certificate (mTLS) |
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | Client private key (mTLS) |
+| `--quic`* | `FERROTUNNEL_QUIC` | `false` | Use QUIC transport |
+| `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | `false` | Enable 0-RTT reconnection |
+
+*\* Requires `--features quic` at build time.*
 
 ### Version
 
@@ -113,6 +122,22 @@ ferrotunnel server --token secret \
 # Client with TLS
 ferrotunnel client --server tunnel.example.com:7835 --token secret \
   --tls --tls-ca ca.crt
+```
+
+### With QUIC Transport
+
+```bash
+# Build with QUIC support
+cargo install ferrotunnel-cli --features quic
+
+# Server with QUIC endpoint
+ferrotunnel server --token secret \
+  --tls-cert server.crt --tls-key server.key \
+  --quic-bind 0.0.0.0:7836
+
+# Client connecting via QUIC
+ferrotunnel client --server 127.0.0.1:7836 --token secret \
+  --quic --tls-skip-verify
 ```
 
 ### Using Environment Variables

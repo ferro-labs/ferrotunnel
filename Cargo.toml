@@ -55,6 +55,9 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 ferrotunnel-observability = { version = "1.0.6", path = "ferrotunnel-observability" }
 
+# QUIC transport
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+
 # High-performance allocator
 mimalloc = { version = "0.1", default-features = false }
 

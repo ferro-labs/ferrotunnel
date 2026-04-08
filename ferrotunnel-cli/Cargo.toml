@@ -57,5 +57,8 @@ mimalloc = { workspace = true }
 # before any rustls ClientConfig/ServerConfig is built (see issue #98)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
+[features]
+quic = ["ferrotunnel-core/quic"]
+
 [lints]
 workspace = true

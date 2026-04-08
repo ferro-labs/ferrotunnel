@@ -32,8 +32,9 @@ async fn main() -> ferrotunnel::Result<()> {
 ## Features
 
 - TLS 1.3 encryption with rustls
+- QUIC transport with native stream multiplexing (feature: `quic`)
 - Token-based authentication
-- HTTP, WebSocket, and TCP tunneling
+- HTTP, WebSocket, gRPC, and TCP tunneling
 - Automatic reconnection with backoff
 - Prometheus metrics and tracing
 

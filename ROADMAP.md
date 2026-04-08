@@ -46,19 +46,27 @@ Embeddable, extensible, and observable reverse tunnel for Rust developers.
   - Native gRPC tunneling over HTTP/2 with automatic detection and trailer preservation
   - **Target Audience**: Enterprise and microservices developers
 
+- **v1.0.7** - QUIC Transport ✅
+  - QUIC tunnel transport using quinn 0.11 (behind `quic` feature flag)
+  - Native QUIC stream multiplexing (no head-of-line blocking)
+  - 0-RTT reconnection support, built-in TLS 1.3
+  - CLI flags: `--quic-bind` (server), `--quic` / `--quic-0rtt` (client)
+  - **Differentiator**: Next-gen transport for competitive advantage
+
 ### Planned
 
 > **Strategy**: Prioritize features that maximize user adoption and "time to first success"
 
-- **v1.0.7** - QUIC Transport (HTTP/3)
-  - QUIC protocol support for reduced latency
-  - **Differentiator**: Next-gen transport for competitive advantage
+- **v1.0.8** - HTTP/3 Ingress
+  - HTTP/3 ingress using h3 + h3-quinn (accept HTTP/3 from browsers)
+  - Alt-Svc header injection for automatic HTTP/3 upgrade
+  - **Value**: Complete HTTP/3 story (QUIC transport + HTTP/3 ingress)
 
-- **v1.0.8** - Multi-region Support
+- **v1.0.9** - Multi-region Support
   - Geographic load balancing
   - Regional failover capabilities
 
-- **v1.0.9** - Custom Domains
+- **v1.0.10** - Custom Domains
   - Custom domain mapping for white-label deployments
 
 - **v2.0.0** - Breaking Changes (if needed)

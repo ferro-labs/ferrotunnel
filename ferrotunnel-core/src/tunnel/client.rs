@@ -16,6 +16,11 @@ use tokio_util::codec::Framed;
 use tracing::{error, info};
 use uuid::Uuid;
 
+#[cfg(feature = "quic")]
+use crate::stream::QuicVirtualStream;
+#[cfg(feature = "quic")]
+use crate::transport::quic;
+
 pub struct TunnelClient {
     server_addr: String,
     auth_token: String,
@@ -152,6 +157,181 @@ impl TunnelClient {
         let (multiplexer, mut split_stream) = Self::setup_multiplexer(framed, stream_handler);
 
         Self::run_session_loop(multiplexer, &mut split_stream).await
+    }
+}
+
+#[cfg(feature = "quic")]
+impl TunnelClient {
+    /// Connect to the server using QUIC transport and run the session.
+    ///
+    /// Opens a control stream for handshake/heartbeats, then accepts
+    /// data streams from the server (each QUIC bidi stream = one tunnel stream).
+    pub async fn connect_and_run_quic<F, Fut>(&mut self, stream_handler: F) -> Result<()>
+    where
+        F: Fn(QuicVirtualStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.connect_and_run_quic_with_callback(stream_handler, |_| {})
+            .await
+    }
+
+    /// Connect using QUIC, call the callback on successful handshake, and run.
+    pub async fn connect_and_run_quic_with_callback<F, Fut, C>(
+        &mut self,
+        stream_handler: F,
+        on_connected: C,
+    ) -> Result<()>
+    where
+        F: Fn(QuicVirtualStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+        C: FnOnce(Uuid) + Send + 'static,
+    {
+        let quic_config = match &self.transport_config {
+            TransportConfig::Quic(c) => c.clone(),
+            _ => {
+                return Err(TunnelError::Config(
+                    "QUIC transport config required".into(),
+                ));
+            }
+        };
+
+        validate_token_format(&self.auth_token, 256)
+            .map_err(|e| TunnelError::Authentication(format!("Invalid token: {e}")))?;
+
+        info!("Connecting to {} via QUIC", self.server_addr);
+        let connection = quic::connect(&self.server_addr, &quic_config).await?;
+        info!("QUIC connected to {}", self.server_addr);
+
+        // Open control stream (first bidi stream)
+        let (ctrl_send, ctrl_recv) = connection.open_bi().await.map_err(|e| {
+            TunnelError::Connection(format!("QUIC open control stream: {e}"))
+        })?;
+
+        let mut ctrl_framed_send = tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
+        let mut ctrl_framed_recv = tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
+
+        // Handshake
+        ctrl_framed_send
+            .send(Frame::Handshake(Box::new(HandshakeFrame {
+                min_version: MIN_PROTOCOL_VERSION,
+                max_version: MAX_PROTOCOL_VERSION,
+                token: self.auth_token.clone(),
+                tunnel_id: self.tunnel_id.clone(),
+                capabilities: vec!["basic".to_string(), "tcp".to_string(), "quic".to_string()],
+            })))
+            .await?;
+
+        let session_id = match ctrl_framed_recv.next().await {
+            Some(Ok(Frame::HandshakeAck {
+                status,
+                session_id,
+                version,
+                server_capabilities: _,
+            })) => match status {
+                HandshakeStatus::Success => {
+                    info!(
+                        "QUIC handshake successful. Session ID: {}, Protocol v{}",
+                        session_id, version
+                    );
+                    on_connected(session_id);
+                    session_id
+                }
+                HandshakeStatus::VersionMismatch => {
+                    return Err(TunnelError::Protocol(
+                        "No compatible protocol version found".into(),
+                    ));
+                }
+                status => {
+                    return Err(TunnelError::Authentication(format!(
+                        "Handshake rejected: {status:?}"
+                    )));
+                }
+            },
+            Some(Ok(_)) => {
+                return Err(TunnelError::Protocol("Expected HandshakeAck".into()));
+            }
+            Some(Err(e)) => {
+                return Err(TunnelError::Io(e));
+            }
+            None => {
+                return Err(TunnelError::Connection("Connection closed".into()));
+            }
+        };
+
+        self.session_id = Some(session_id);
+
+        // Create QUIC multiplexer for accepting data streams
+        let quic_mux = crate::stream::QuicMultiplexer::new(connection.clone(), true);
+
+        // Run heartbeat + data stream acceptance in parallel
+        let result = tokio::select! {
+            result = Self::quic_heartbeat_loop(&mut ctrl_framed_send, &mut ctrl_framed_recv) => result,
+            result = Self::quic_stream_accept_loop(&quic_mux, stream_handler) => result,
+            _ = connection.closed() => {
+                info!("QUIC connection closed by server");
+                Err(TunnelError::Connection("Connection closed".into()))
+            }
+        };
+
+        result
+    }
+
+    /// Send heartbeats and process heartbeat acks on the control stream.
+    async fn quic_heartbeat_loop(
+        ctrl_send: &mut tokio_util::codec::FramedWrite<quinn::SendStream, TunnelCodec>,
+        ctrl_recv: &mut tokio_util::codec::FramedRead<quinn::RecvStream, TunnelCodec>,
+    ) -> Result<()> {
+        let mut heartbeat_interval = interval(Duration::from_secs(30));
+
+        loop {
+            tokio::select! {
+                _ = heartbeat_interval.tick() => {
+                    let ts = clamp_u128_to_u64(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                    );
+                    ctrl_send
+                        .send(Frame::Heartbeat { timestamp: ts })
+                        .await
+                        .map_err(|e| TunnelError::Protocol(format!("Heartbeat send: {e}")))?;
+                }
+                result = ctrl_recv.next() => {
+                    match result {
+                        Some(Ok(Frame::HeartbeatAck { .. })) => {}
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => {
+                            return Err(TunnelError::Io(e));
+                        }
+                        None => {
+                            return Err(TunnelError::Connection("Control stream closed".into()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Accept incoming data streams from the QUIC connection and dispatch to handler.
+    async fn quic_stream_accept_loop<F, Fut>(
+        multiplexer: &crate::stream::QuicMultiplexer,
+        stream_handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(QuicVirtualStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        loop {
+            match multiplexer.accept_stream().await {
+                Ok(stream) => {
+                    tokio::spawn(stream_handler(stream));
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
     }
 }
 

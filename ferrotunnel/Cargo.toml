@@ -24,6 +24,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+quic = ["ferrotunnel-core/quic"]
+
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

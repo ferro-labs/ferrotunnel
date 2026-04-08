@@ -218,6 +218,21 @@ impl ServerBuilder {
         self
     }
 
+    /// Configure QUIC transport for the server.
+    ///
+    /// When enabled, the server will accept QUIC connections for the tunnel control plane.
+    /// QUIC requires TLS 1.3 (built-in), so certificate and key paths are required.
+    #[cfg(feature = "quic")]
+    #[must_use]
+    pub fn quic(mut self, config: &ferrotunnel_common::QuicConfig) -> Self {
+        if let Some(quic) =
+            ferrotunnel_core::transport::quic::QuicTransportConfig::from_common(config)
+        {
+            self.transport_config = Some(TransportConfig::Quic(quic));
+        }
+        self
+    }
+
     /// Build the server with the configured options.
     ///
     /// # Errors

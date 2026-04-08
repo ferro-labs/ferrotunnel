@@ -9,7 +9,7 @@ Wire protocol definitions and codec for [FerroTunnel](https://github.com/ferro-l
 
 This crate defines the binary protocol used for tunnel communication:
 
-- **12 frame types** for control, data, and keepalive
+- **12 frame types** for control, data, and keepalive (7 protocol variants: HTTP, HTTPS, HTTP2, WebSocket, gRPC, TCP, QUIC)
 - **Length-prefixed codec** (4-byte length + 1-byte type) with bincode control frames
 - **16MB max frame size** with validation
 

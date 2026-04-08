@@ -59,8 +59,24 @@ pub struct ServerArgs {
     /// Enable metrics endpoint
     #[arg(long, env = "FERROTUNNEL_METRICS")]
     metrics: bool,
+
+    /// QUIC bind address (UDP) for tunnel connections
+    #[cfg(feature = "quic")]
+    #[arg(long, env = "FERROTUNNEL_QUIC_BIND")]
+    quic_bind: Option<SocketAddr>,
+
+    /// Path to TLS certificate for QUIC (reuses --tls-cert if not specified)
+    #[cfg(feature = "quic")]
+    #[arg(long, env = "FERROTUNNEL_QUIC_CERT")]
+    quic_cert: Option<PathBuf>,
+
+    /// Path to TLS key for QUIC (reuses --tls-key if not specified)
+    #[cfg(feature = "quic")]
+    #[arg(long, env = "FERROTUNNEL_QUIC_KEY")]
+    quic_key: Option<PathBuf>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(args: ServerArgs) -> Result<()> {
     let enable_tracing = args.observability;
     let enable_metrics = args.metrics;
@@ -146,6 +162,31 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         None
     };
 
+    // Start QUIC transport (if enabled)
+    #[cfg(feature = "quic")]
+    let quic_handle = if let Some(quic_addr) = args.quic_bind {
+        let cert_path = args.quic_cert.or(args.tls_cert.clone());
+        let key_path = args.quic_key.or(args.tls_key.clone());
+
+        if let (Some(cert), Some(key)) = (cert_path, key_path) {
+            info!("Starting QUIC transport on {} (UDP)", quic_addr);
+            let quic_config = ferrotunnel_core::transport::quic::QuicTransportConfig {
+                cert_path: cert.to_string_lossy().to_string(),
+                key_path: key.to_string_lossy().to_string(),
+                ca_cert_path: args.tls_ca.as_ref().map(|p| p.to_string_lossy().to_string()),
+                ..Default::default()
+            };
+            let quic_server = TunnelServer::new(args.bind, args.token.clone())
+                .with_transport(ferrotunnel_core::transport::TransportConfig::Quic(quic_config));
+            Some(tokio::spawn(async move { quic_server.run_quic(quic_addr).await }))
+        } else {
+            error!("QUIC requires TLS certificates. Provide --quic-cert/--quic-key or --tls-cert/--tls-key");
+            None
+        }
+    } else {
+        None
+    };
+
     // Initialize plugins (after binding ports to avoid "Connection Refused")
     // Incoming requests will wait on the plugin lock if they arrive during init
     registry
@@ -165,6 +206,13 @@ pub async fn run(args: ServerArgs) -> Result<()> {
                     } else {
                         Ok(())
                     }
+                },
+                async {
+                    #[cfg(feature = "quic")]
+                    if let Some(h) = quic_handle {
+                        return h.await.map_err(std::io::Error::other)?;
+                    }
+                    Ok(())
                 }
             )
         } => {

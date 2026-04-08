@@ -50,11 +50,15 @@ kanal = "0.1"
 # Lock-free object pooling
 crossbeam-queue = "0.3"
 
+# QUIC transport
+quinn = { workspace = true, optional = true }
+
 # Optional metrics (decode/encode latency, queue depth)
 ferrotunnel-observability = { version = "1.0.6", path = "../ferrotunnel-observability", optional = true }
 
 [features]
 default = []
+quic = ["dep:quinn"]
 metrics = ["dep:ferrotunnel-observability"]
 
 [dev-dependencies]

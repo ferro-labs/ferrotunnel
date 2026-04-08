@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 ferrotunnel-observability = { version = "1.0.6", path = "../ferrotunnel-observability", optional = true }
 
 [features]
+quic = ["ferrotunnel-core/quic"]
 metrics = ["dep:ferrotunnel-observability"]
 
 [lints]

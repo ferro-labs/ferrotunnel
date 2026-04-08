@@ -139,6 +139,58 @@ async fn main() -> ferrotunnel::Result<()> {
 - Streaming RPCs (server-streaming, client-streaming, bidirectional)
 - Standard gRPC status codes and error propagation
 
+### QUIC Transport
+
+FerroTunnel v1.0.7+ supports QUIC as an alternative transport for the tunnel control plane, providing built-in TLS 1.3 encryption, native stream multiplexing (no head-of-line blocking), and lower connection latency.
+
+**CLI** — enable with the `quic` feature flag:
+
+```bash
+# Build with QUIC support
+cargo build --features quic
+
+# Server: listen on both TCP and QUIC
+ferrotunnel server --token secret --quic-bind 0.0.0.0:7836 --tls-cert server.crt --tls-key server.key
+
+# Client: connect via QUIC
+ferrotunnel client --server 127.0.0.1:7836 --quic --tls-skip-verify
+```
+
+**Library**:
+
+```rust
+use ferrotunnel::Client;
+use ferrotunnel_common::QuicConfig;
+
+#[tokio::main]
+async fn main() -> ferrotunnel::Result<()> {
+    let quic = QuicConfig {
+        enabled: true,
+        cert_path: Some("client.crt".into()),
+        key_path: Some("client.key".into()),
+        skip_verify: true,
+        ..Default::default()
+    };
+
+    let mut client = Client::builder()
+        .server_addr("tunnel.example.com:7836")
+        .token("my-secret-token")
+        .local_addr("127.0.0.1:8080")
+        .quic(&quic)
+        .build()?;
+
+    client.start().await?;
+    tokio::signal::ctrl_c().await?;
+    client.shutdown().await
+}
+```
+
+**Key benefits**:
+- No head-of-line blocking — each tunnel stream uses a native QUIC stream
+- Built-in TLS 1.3 encryption (mandatory in QUIC)
+- 0-RTT reconnection support (`--quic-0rtt` flag)
+- UDP-based — works better on lossy networks
+
 ## Features
 
 | Feature | Description |
@@ -153,6 +205,7 @@ async fn main() -> ferrotunnel::Result<()> {
 | **Observability** | Prometheus metrics + OpenTelemetry tracing |
 | **WebSocket** | Transparent WebSocket upgrade tunneling |
 | **gRPC** | Native gRPC tunneling over HTTP/2 with trailer preservation |
+| **QUIC** | Optional QUIC transport with native stream multiplexing |
 | **TCP & HTTP** | Forward both HTTP and raw TCP traffic |
 
 
@@ -209,6 +262,7 @@ ferrotunnel server [OPTIONS]
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress |
 | `--tls-cert` | `FERROTUNNEL_TLS_CERT` | - | TLS certificate |
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | TLS private key |
+| `--quic-bind`* | `FERROTUNNEL_QUIC_BIND` | - | QUIC endpoint (UDP) |
 
 ### Client
 
@@ -225,6 +279,10 @@ ferrotunnel client [OPTIONS]
 | `--dashboard-port` | `FERROTUNNEL_DASHBOARD_PORT` | `4040` | Dashboard port |
 | `--tls` | `FERROTUNNEL_TLS` | false | Enable TLS |
 | `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate |
+| `--quic`* | `FERROTUNNEL_QUIC` | false | Use QUIC transport |
+| `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | false | Enable 0-RTT reconnection |
+
+*\* Requires `--features quic` at build time.*
 
 See [ferrotunnel-cli/README.md](ferrotunnel-cli/README.md) for all options.
 
