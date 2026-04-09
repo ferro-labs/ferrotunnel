@@ -179,8 +179,12 @@ impl QuicMultiplexer {
         recv.read_exact(&mut header)
             .await
             .map_err(|e| TunnelError::Connection(format!("QUIC read header: {e}")))?;
-        let protocol = u8_to_protocol(header[0]);
-        let priority = u8_to_priority(header[1]);
+        let protocol = u8_to_protocol(header[0]).map_err(|v| {
+            TunnelError::Protocol(format!("invalid protocol byte in QUIC stream header: {v}"))
+        })?;
+        let priority = u8_to_priority(header[1]).map_err(|v| {
+            TunnelError::Protocol(format!("invalid priority byte in QUIC stream header: {v}"))
+        })?;
         let stream_id = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
 
         let _ = priority; // reserved for future QUIC priority support
@@ -211,25 +215,25 @@ fn protocol_to_u8(p: Protocol) -> u8 {
     }
 }
 
-fn u8_to_protocol(v: u8) -> Protocol {
+fn u8_to_protocol(v: u8) -> std::result::Result<Protocol, u8> {
     match v {
-        0 => Protocol::HTTP,
-        1 => Protocol::HTTPS,
-        2 => Protocol::HTTP2,
-        3 => Protocol::WebSocket,
-        4 => Protocol::GRPC,
-        5 => Protocol::TCP,
-        6 => Protocol::QUIC,
-        _ => Protocol::TCP, // fallback
+        0 => Ok(Protocol::HTTP),
+        1 => Ok(Protocol::HTTPS),
+        2 => Ok(Protocol::HTTP2),
+        3 => Ok(Protocol::WebSocket),
+        4 => Ok(Protocol::GRPC),
+        5 => Ok(Protocol::TCP),
+        6 => Ok(Protocol::QUIC),
+        _ => Err(v),
     }
 }
 
-fn u8_to_priority(v: u8) -> StreamPriority {
+fn u8_to_priority(v: u8) -> std::result::Result<StreamPriority, u8> {
     match v {
-        0 => StreamPriority::Normal,
-        1 => StreamPriority::Low,
-        2 => StreamPriority::High,
-        3 => StreamPriority::Critical,
-        _ => StreamPriority::Normal,
+        0 => Ok(StreamPriority::Normal),
+        1 => Ok(StreamPriority::Low),
+        2 => Ok(StreamPriority::High),
+        3 => Ok(StreamPriority::Critical),
+        _ => Err(v),
     }
 }
