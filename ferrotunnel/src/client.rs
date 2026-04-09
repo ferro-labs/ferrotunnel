@@ -27,7 +27,6 @@ use ferrotunnel_http::HttpProxy;
 use ferrotunnel_protocol::frame::Protocol;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -126,6 +125,7 @@ impl Client {
                         client,
                         transport_config.clone(),
                         proxy_dispatch.clone(),
+                        #[cfg(feature = "quic")]
                         local_addr.clone(),
                         info_tx.clone(),
                     ) => result,
@@ -164,7 +164,7 @@ impl Client {
         mut client: TunnelClient,
         transport_config: TransportConfig,
         proxy_dispatch: StreamDispatch,
-        local_addr: String,
+        #[cfg(feature = "quic")] local_addr: String,
         info_tx: TunnelInfoTx,
     ) -> Result<()> {
         match transport_config {
@@ -212,7 +212,7 @@ impl Client {
     #[cfg(feature = "quic")]
     fn spawn_quic_bridge(local_addr: String, stream: ferrotunnel_core::stream::QuicVirtualStream) {
         tokio::spawn(async move {
-            match TcpStream::connect(&local_addr).await {
+            match tokio::net::TcpStream::connect(&local_addr).await {
                 Ok(mut local_stream) => {
                     let mut tunnel_stream = stream;
                     let _ =
