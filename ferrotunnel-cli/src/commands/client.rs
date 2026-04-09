@@ -140,6 +140,16 @@ pub struct ClientArgs {
     /// Path to client private key file (PEM format) for mutual TLS
     #[arg(long, env = "FERROTUNNEL_TLS_KEY")]
     tls_key: Option<std::path::PathBuf>,
+
+    /// Use QUIC transport to connect to server (requires server QUIC support)
+    #[cfg(feature = "quic")]
+    #[arg(long = "quic", env = "FERROTUNNEL_QUIC")]
+    quic: bool,
+
+    /// Enable 0-RTT for faster QUIC reconnection (vulnerable to replay — use with caution)
+    #[cfg(feature = "quic")]
+    #[arg(long = "quic-0rtt", env = "FERROTUNNEL_QUIC_0RTT")]
+    quic_0rtt: bool,
 }
 
 /// Resolve token from args, then env, then secure prompt.
@@ -159,6 +169,7 @@ fn prompt_token() -> Result<String> {
         .context("Could not read token from terminal (is stdin a TTY?). Set FERROTUNNEL_TOKEN or pass --token")
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(args: ClientArgs) -> Result<()> {
     let enable_tracing = args.features.telemetry.observability;
     let enable_metrics = args.features.telemetry.metrics;
@@ -193,6 +204,12 @@ pub async fn run(args: ClientArgs) -> Result<()> {
         Arc::new(ferrotunnel_http::HttpProxy::new(args.local_addr.clone()))
     };
 
+    // Determine if QUIC transport should be used
+    #[cfg(feature = "quic")]
+    let use_quic = args.quic;
+    #[cfg(not(feature = "quic"))]
+    let use_quic = false;
+
     // Simple reconnection loop with graceful shutdown
     tokio::select! {
         _ = async {
@@ -201,44 +218,85 @@ pub async fn run(args: ClientArgs) -> Result<()> {
                 if let Some(ref tid) = tunnel_id_string {
                     client = client.with_tunnel_id(tid.clone());
                 }
-                client = setup_tls(client, &args);
 
-                let proxy_ref = proxy.clone();
+                let connect_result = if use_quic {
+                    #[cfg(feature = "quic")]
+                    {
+                        info!("Using QUIC transport");
+                        let quic_config = setup_quic_config(&args);
+                        client = client.with_transport(
+                            ferrotunnel_core::transport::TransportConfig::Quic(quic_config),
+                        );
 
-                let local_addr_config = args.local_addr.clone();
-                match client
-                    .connect_and_run(move |stream| {
-                        let proxy = proxy_ref.clone();
-                        let local_addr = local_addr_config.clone();
-                        async move {
-                            if stream.protocol() == Protocol::TCP {
-                                // Handle raw TCP stream
-                                tokio::spawn(async move {
-                                    match TcpStream::connect(&local_addr).await {
-                                        Ok(mut local_stream) => {
-                                            let mut tunnel_stream = stream;
-                                            let _ = tokio::io::copy_bidirectional(
-                                                &mut tunnel_stream,
-                                                &mut local_stream,
-                                            )
-                                            .await;
+                        let local_addr_config = args.local_addr.clone();
+                        client
+                            .connect_and_run_quic(move |stream| {
+                                let local_addr = local_addr_config.clone();
+                                async move {
+                                    // All QUIC streams forwarded via bidirectional copy
+                                    tokio::spawn(async move {
+                                        match TcpStream::connect(&local_addr).await {
+                                            Ok(mut local_stream) => {
+                                                let mut tunnel_stream = stream;
+                                                let _ = tokio::io::copy_bidirectional(
+                                                    &mut tunnel_stream,
+                                                    &mut local_stream,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Failed to connect to local service {}: {}",
+                                                    local_addr, e
+                                                );
+                                            }
                                         }
-                                        Err(e) => {
-                                            error!(
-                                                "Failed to connect to local TCP service {}: {}",
-                                                local_addr, e
-                                            );
+                                    });
+                                }
+                            })
+                            .await
+                    }
+                    #[cfg(not(feature = "quic"))]
+                    {
+                        unreachable!("QUIC not enabled")
+                    }
+                } else {
+                    client = setup_tls(client, &args);
+                    let proxy_ref = proxy.clone();
+                    let local_addr_config = args.local_addr.clone();
+                    client
+                        .connect_and_run(move |stream| {
+                            let proxy = proxy_ref.clone();
+                            let local_addr = local_addr_config.clone();
+                            async move {
+                                if stream.protocol() == Protocol::TCP {
+                                    tokio::spawn(async move {
+                                        match TcpStream::connect(&local_addr).await {
+                                            Ok(mut local_stream) => {
+                                                let mut tunnel_stream = stream;
+                                                let _ = tokio::io::copy_bidirectional(
+                                                    &mut tunnel_stream,
+                                                    &mut local_stream,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Failed to connect to local TCP service {}: {}",
+                                                    local_addr, e
+                                                );
+                                            }
                                         }
-                                    }
-                                });
-                            } else {
-                                // Handle HTTP/WebSocket stream via proxy
-                                proxy.handle(stream);
+                                    });
+                                } else {
+                                    proxy.handle(stream);
+                                }
                             }
-                        }
-                    })
-                    .await
-                {
+                        })
+                        .await
+                };
+
+                match connect_result {
                     Ok(()) => {
                         info!("Client finished normally, exiting.");
                         break;
@@ -308,6 +366,30 @@ async fn setup_dashboard(args: &ClientArgs, tunnel_id: uuid::Uuid) -> Arc<dyn St
     };
 
     Arc::new(ferrotunnel_http::HttpProxy::new(args.local_addr.clone()).with_layer(capture_layer))
+}
+
+#[cfg(feature = "quic")]
+fn setup_quic_config(args: &ClientArgs) -> ferrotunnel_core::transport::quic::QuicTransportConfig {
+    ferrotunnel_core::transport::quic::QuicTransportConfig {
+        ca_cert_path: args
+            .tls_ca
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        cert_path: args
+            .tls_cert
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        key_path: args
+            .tls_key
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        server_name: args.tls_server_name.clone(),
+        skip_verify: args.features.tls.skip_verify,
+        enable_0rtt: args.quic_0rtt,
+        ..Default::default()
+    }
 }
 
 fn setup_tls(mut client: TunnelClient, args: &ClientArgs) -> TunnelClient {

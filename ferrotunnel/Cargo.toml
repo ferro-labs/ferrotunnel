@@ -12,17 +12,20 @@ keywords = ["tunnel", "reverse-proxy", "networking", "async"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-ferrotunnel-common = { version = "1.0.6", path = "../ferrotunnel-common" }
-ferrotunnel-protocol = { version = "1.0.6", path = "../ferrotunnel-protocol" }
-ferrotunnel-core = { version = "1.0.6", path = "../ferrotunnel-core" }
-ferrotunnel-http = { version = "1.0.6", path = "../ferrotunnel-http" }
-ferrotunnel-plugin = { version = "1.0.6", path = "../ferrotunnel-plugin" }
+ferrotunnel-common = { version = "1.0.7", path = "../ferrotunnel-common" }
+ferrotunnel-protocol = { version = "1.0.7", path = "../ferrotunnel-protocol" }
+ferrotunnel-core = { version = "1.0.7", path = "../ferrotunnel-core" }
+ferrotunnel-http = { version = "1.0.7", path = "../ferrotunnel-http" }
+ferrotunnel-plugin = { version = "1.0.7", path = "../ferrotunnel-plugin" }
 
 # Re-export commonly used dependencies
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+quic = ["ferrotunnel-core/quic"]
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

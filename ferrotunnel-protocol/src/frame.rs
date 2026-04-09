@@ -177,6 +177,7 @@ pub enum Protocol {
     WebSocket,
     GRPC,
     TCP,
+    QUIC,
 }
 
 /// Stream close reasons

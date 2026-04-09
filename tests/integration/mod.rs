@@ -9,6 +9,8 @@ mod error_test;
 mod grpc_test;
 mod multi_client_test;
 mod plugin_test;
+#[cfg(feature = "quic")]
+mod quic_test;
 mod tcp_test;
 mod tls_test;
 mod tunnel_test;

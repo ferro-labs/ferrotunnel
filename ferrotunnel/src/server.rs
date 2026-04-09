@@ -108,6 +108,19 @@ impl Server {
         let ingress = HttpIngress::new(config.http_bind_addr, sessions, registry);
 
         // Spawn both services
+        #[cfg(feature = "quic")]
+        let tunnel_handle = {
+            let tunnel_transport = self.transport_config.clone();
+            let tunnel_bind_addr = config.bind_addr;
+            tokio::spawn(async move {
+                if matches!(tunnel_transport, TransportConfig::Quic(_)) {
+                    tunnel_server.run_quic(tunnel_bind_addr).await
+                } else {
+                    tunnel_server.run().await
+                }
+            })
+        };
+        #[cfg(not(feature = "quic"))]
         let tunnel_handle = tokio::spawn(async move { tunnel_server.run().await });
         let ingress_handle = tokio::spawn(async move { ingress.start().await });
 
@@ -214,6 +227,21 @@ impl ServerBuilder {
     pub fn tls(mut self, config: &TlsConfig) -> Self {
         if let Some(tls) = TlsTransportConfig::from_common(config) {
             self.transport_config = Some(TransportConfig::Tls(tls));
+        }
+        self
+    }
+
+    /// Configure QUIC transport for the server.
+    ///
+    /// When enabled, the server will accept QUIC connections for the tunnel control plane.
+    /// QUIC requires TLS 1.3 (built-in), so certificate and key paths are required.
+    #[cfg(feature = "quic")]
+    #[must_use]
+    pub fn quic(mut self, config: &ferrotunnel_common::QuicConfig) -> Self {
+        if let Some(quic) =
+            ferrotunnel_core::transport::quic::QuicTransportConfig::from_common(config)
+        {
+            self.transport_config = Some(TransportConfig::Quic(quic));
         }
         self
     }

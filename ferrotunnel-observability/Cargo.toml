@@ -14,7 +14,7 @@ categories = ["network-programming"]
 include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
-ferrotunnel-common = { version = "1.0.6", path = "../ferrotunnel-common" }
+ferrotunnel-common = { version = "1.0.7", path = "../ferrotunnel-common" }
 anyhow = { workspace = true }
 
 # Metrics

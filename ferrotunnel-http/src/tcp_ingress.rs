@@ -120,7 +120,7 @@ impl TcpIngress {
 /// Handle a single TCP connection through the tunnel
 async fn handle_tcp_connection(
     client_stream: TcpStream,
-    multiplexer: ferrotunnel_core::stream::Multiplexer,
+    multiplexer: ferrotunnel_core::stream::AnyMultiplexer,
     peer_addr: SocketAddr,
     config: TcpIngressConfig,
 ) -> Result<()> {

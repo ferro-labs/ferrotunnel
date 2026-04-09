@@ -73,3 +73,26 @@ impl Default for RateLimitConfig {
         }
     }
 }
+
+/// QUIC transport configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuicConfig {
+    /// Enable QUIC transport
+    pub enabled: bool,
+    /// Path to certificate file (required — QUIC mandates TLS 1.3)
+    pub cert_path: Option<PathBuf>,
+    /// Path to private key file
+    pub key_path: Option<PathBuf>,
+    /// Path to CA certificate (for peer verification)
+    pub ca_cert_path: Option<PathBuf>,
+    /// Server name for SNI (client-side)
+    pub server_name: Option<String>,
+    /// Enable 0-RTT for faster reconnection (vulnerable to replay — use with caution)
+    pub enable_0rtt: bool,
+    /// Maximum idle timeout in seconds (default: 30)
+    pub max_idle_timeout_secs: Option<u64>,
+    /// Keep-alive interval in seconds (default: 10)
+    pub keep_alive_interval_secs: Option<u64>,
+    /// Skip certificate verification (insecure, for self-signed certs)
+    pub skip_verify: bool,
+}

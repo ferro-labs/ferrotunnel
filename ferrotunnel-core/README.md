@@ -14,6 +14,7 @@ This crate provides the core tunnel logic:
 - `Multiplexer` - Stream multiplexing over a single connection
 - `Session` - Session management with heartbeat tracking
 - `TlsTransport` - Encrypted transport support
+- `QuicMultiplexer` - QUIC-native stream multiplexing (feature: `quic`)
 
 ## Components
 
@@ -30,6 +31,7 @@ This crate provides the core tunnel logic:
 ### Transport
 - **TCP transport** - Standard TCP connection
 - **TLS support** - Native TLS 1.3 encryption (rustls)
+- **QUIC transport** - UDP-based transport with native stream multiplexing (feature: `quic`, uses quinn 0.11)
 
 ## Usage
 

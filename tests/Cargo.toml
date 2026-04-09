@@ -44,5 +44,10 @@ bytes = { workspace = true }
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 
+quinn = { workspace = true, optional = true }
+
+[features]
+quic = ["dep:quinn", "ferrotunnel-core/quic", "ferrotunnel/quic"]
+
 [lints]
 workspace = true

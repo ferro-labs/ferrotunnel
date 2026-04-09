@@ -82,12 +82,14 @@ ferrotunnel/
 │   │   ├── stream/
 │   │   │   ├── mod.rs
 │   │   │   ├── multiplexer.rs
+│   │   │   ├── quic_multiplexer.rs  # (feature: quic)
 │   │   │   ├── pool.rs
 │   │   │   └── bytes_pool.rs
 │   │   └── transport/
 │   │       ├── mod.rs
 │   │       ├── tcp.rs
 │   │       ├── tls.rs
+│   │       ├── quic.rs              # (feature: quic)
 │   │       ├── batched_sender.rs
 │   │       └── socket_tuning.rs
 │   └── benches/
@@ -176,6 +178,7 @@ ferrotunnel/
 │       ├── tls_test.rs
 │       ├── tcp_test.rs
 │       ├── websocket_test.rs
+│       ├── quic_test.rs          # (feature: quic)
 │       ├── concurrent_test.rs
 │       ├── multi_client_test.rs
 │       └── error_test.rs

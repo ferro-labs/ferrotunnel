@@ -10,7 +10,7 @@ Shared types and error handling for [FerroTunnel](https://github.com/ferro-labs/
 This crate provides common utilities shared across all FerroTunnel crates:
 
 - **Error handling**: `TunnelError`, `Result<T>`
-- **Configuration**: `TlsConfig`, `LimitsConfig`, `RateLimitConfig` (serializable for config files)
+- **Configuration**: `TlsConfig`, `QuicConfig`, `LimitsConfig`, `RateLimitConfig` (serializable for config files)
 - **Default constants**: `DEFAULT_TUNNEL_PORT` (7835), `DEFAULT_HTTP_PORT` (8080), `DEFAULT_METRICS_PORT` (9090), `DEFAULT_DASHBOARD_PORT` (4040), `DEFAULT_TUNNEL_BIND`, `DEFAULT_HTTP_BIND`, `DEFAULT_LOCAL_ADDR`
 
 ## Usage

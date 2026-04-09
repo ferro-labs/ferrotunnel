@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-04-09
+
+### Added
+
+#### QUIC Transport
+- **QUIC tunnel transport**: Optional QUIC-based control plane using [quinn](https://crates.io/crates/quinn) 0.11 (behind the `quic` feature flag). Provides built-in TLS 1.3 encryption, native stream multiplexing (no head-of-line blocking), and lower connection latency over UDP
+- **`QuicConfig`**: New configuration struct in `ferrotunnel-common` for QUIC transport settings (cert paths, 0-RTT, idle timeout, keep-alive)
+- **`QuicTransportConfig`**: Core transport config in `ferrotunnel-core` that mirrors `TlsTransportConfig` with QUIC-specific fields, reusing existing rustls + ring crypto stack (zero new crypto dependencies)
+- **`QuicMultiplexer` / `QuicVirtualStream`**: QUIC-native stream multiplexer that maps each tunnel stream 1:1 to a QUIC bidirectional stream, eliminating head-of-line blocking. `QuicVirtualStream` implements `AsyncRead + AsyncWrite`
+- **`AnyMultiplexer`**: Unified enum (`Tcp`/`Quic`) so the HTTP ingress can open streams without knowing the underlying transport
+- **`TunnelServer::run_quic()`**: New method to run the QUIC server on a UDP endpoint alongside (or instead of) the TCP server
+- **`TunnelClient::connect_and_run_quic()`**: New method for QUIC-based client connections with dedicated control stream for handshake/heartbeat
+- **Builder API**: Added `.quic(&QuicConfig)` method on both `ServerBuilder` and `ClientBuilder`
+- **CLI flags** (gated behind `--features quic`):
+  - Server: `--quic-bind`, `--quic-cert`, `--quic-key`
+  - Client: `--quic`, `--quic-0rtt` (`--quic-0rtt` currently falls back to a full handshake)
+- **`Protocol::QUIC`**: New variant in the protocol enum
+- **Integration test**: `test_quic_connection` verifying end-to-end QUIC handshake
+
+#### Dependencies
+- **quinn** 0.11 (optional, `quic` feature): QUIC implementation using rustls 0.23 + ring (already existing dependencies)
+
 ## [1.0.6] - Unreleased
 
 ### Fixed

@@ -1,6 +1,6 @@
 use crate::auth::{constant_time_eq, validate_token_format};
 use crate::resource_limits::{ServerResourceLimits, SessionPermit};
-use crate::stream::{Multiplexer, PrioritizedFrame};
+use crate::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
 use crate::tunnel::common::clamp_u128_to_u64;
@@ -17,6 +17,11 @@ use tokio::net::TcpListener;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+#[cfg(feature = "quic")]
+use crate::stream::QuicMultiplexer;
+#[cfg(feature = "quic")]
+use crate::transport::quic;
 
 pub struct TunnelServer {
     addr: SocketAddr,
@@ -55,6 +60,13 @@ impl TunnelServer {
     #[must_use]
     pub fn with_transport(mut self, config: TransportConfig) -> Self {
         self.transport_config = config;
+        self
+    }
+
+    /// Reuse an existing session backend so multiple listeners share tunnel state.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: SessionStoreBackend) -> Self {
+        self.sessions = sessions;
         self
     }
 
@@ -169,47 +181,12 @@ impl TunnelServer {
             let frame = result?;
             match frame {
                 Frame::Handshake(handshake) => {
-                    let HandshakeFrame {
-                        min_version,
-                        max_version,
-                        token,
-                        tunnel_id,
-                        capabilities,
-                    } = *handshake;
-                    if let Err(e) = validate_token_format(&token, 256) {
-                        warn!("Invalid token format from {}: {}", addr, e);
-                        framed
-                            .send(Frame::HandshakeAck {
-                                status: HandshakeStatus::InvalidToken,
-                                session_id: Uuid::nil(),
-                                version: 0,
-                                server_capabilities: vec![],
-                            })
-                            .await?;
-                        return Ok(());
-                    }
-
-                    if !constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
-                        warn!("Invalid token from {}", addr);
-                        framed
-                            .send(Frame::HandshakeAck {
-                                status: HandshakeStatus::InvalidToken,
-                                session_id: Uuid::nil(),
-                                version: 0,
-                                server_capabilities: vec![],
-                            })
-                            .await?;
-                        return Ok(());
-                    }
-
-                    // Version negotiation
-                    let negotiated_version = match negotiate_version(min_version, max_version) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!("Version negotiation failed for {}: {}", addr, e);
+                    let auth = match authenticate_handshake(*handshake, &expected_token, addr) {
+                        Ok(auth) => auth,
+                        Err(status) => {
                             framed
                                 .send(Frame::HandshakeAck {
-                                    status: HandshakeStatus::VersionMismatch,
+                                    status,
                                     session_id: Uuid::nil(),
                                     version: 0,
                                     server_capabilities: vec![],
@@ -219,16 +196,13 @@ impl TunnelServer {
                         }
                     };
 
-                    info!(
-                        "Client {} supports v{}-{}, negotiated v{}",
-                        addr, min_version, max_version, negotiated_version
-                    );
-
-                    // Success
-                    let session_id = Uuid::new_v4();
-
-                    // Determine tunnel ID: prefer requested, fallback to random session ID
-                    let tunnel_id = tunnel_id.unwrap_or_else(|| session_id.to_string());
+                    let AuthenticatedHandshake {
+                        session_id,
+                        tunnel_id,
+                        negotiated_version,
+                        token,
+                        capabilities,
+                    } = auth;
 
                     // Setup multiplexer with kanal channels
                     let parts = framed.into_parts();
@@ -261,7 +235,7 @@ impl TunnelServer {
                         addr,
                         token,
                         capabilities,
-                        Some(multiplexer.clone()),
+                        Some(AnyMultiplexer::Tcp(multiplexer.clone())),
                     );
 
                     if let Err(e) = sessions.add(session) {
@@ -356,6 +330,318 @@ impl TunnelServer {
         sessions.remove(&session_id);
         Ok(())
     }
+}
+
+#[cfg(feature = "quic")]
+impl TunnelServer {
+    /// Run the QUIC transport server on the given UDP address.
+    ///
+    /// This is separate from `run()` which uses TCP. Both can run simultaneously
+    /// on different ports.
+    pub async fn run_quic(self, quic_addr: SocketAddr) -> Result<()> {
+        let quic_config = match &self.transport_config {
+            TransportConfig::Quic(c) => c.clone(),
+            _ => {
+                return Err(TunnelError::Config(
+                    "QUIC transport config required for run_quic()".into(),
+                ));
+            }
+        };
+
+        let endpoint = quic::create_server_endpoint(&quic_config, quic_addr)?;
+        info!("QUIC server listening on {}", quic_addr);
+
+        let sessions = self.sessions.clone();
+        let timeout = self.session_timeout;
+
+        // Spawn session cleanup task
+        let cleanup_sessions = sessions.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let count = cleanup_sessions.cleanup_stale_sessions(timeout);
+                if count > 0 {
+                    info!("Cleaned up {} stale sessions", count);
+                }
+            }
+        });
+
+        loop {
+            match quic::accept(&endpoint).await {
+                Ok((connection, addr)) => {
+                    let session_permit = match self.resource_limits.try_acquire_session() {
+                        Ok(permit) => permit,
+                        Err(e) => {
+                            warn!("Rejecting QUIC connection from {}: {}", addr, e);
+                            continue;
+                        }
+                    };
+
+                    let sessions = sessions.clone();
+                    let token = self.auth_token.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_quic_connection(
+                            connection,
+                            addr,
+                            sessions,
+                            token,
+                            session_permit,
+                        )
+                        .await
+                        {
+                            warn!("QUIC connection error for {}: {}", addr, e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("QUIC accept error: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Handle a single QUIC connection.
+    ///
+    /// Uses the first bidirectional stream as a control channel for handshake and heartbeats.
+    /// Subsequent bidirectional streams carry data (each QUIC stream = one tunnel stream).
+    #[allow(clippy::too_many_lines)]
+    async fn handle_quic_connection(
+        connection: quinn::Connection,
+        addr: SocketAddr,
+        sessions: SessionStoreBackend,
+        expected_token: String,
+        _session_permit: SessionPermit,
+    ) -> Result<()> {
+        // Accept the control stream (first bidi stream opened by client)
+        let (ctrl_send, ctrl_recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| TunnelError::Connection(format!("QUIC control stream accept: {e}")))?;
+
+        let mut ctrl_framed_recv =
+            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
+        let mut ctrl_framed_send =
+            tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
+
+        // 1. Handshake on control stream
+        let frame = ctrl_framed_recv
+            .next()
+            .await
+            .ok_or_else(|| TunnelError::Connection("QUIC control stream closed".into()))?
+            .map_err(TunnelError::Io)?;
+
+        let (session_id, tunnel_id, multiplexer) = match frame {
+            Frame::Handshake(handshake) => {
+                let auth = match authenticate_handshake(*handshake, &expected_token, addr) {
+                    Ok(auth) => auth,
+                    Err(status) => {
+                        ctrl_framed_send
+                            .send(Frame::HandshakeAck {
+                                status,
+                                session_id: Uuid::nil(),
+                                version: 0,
+                                server_capabilities: vec![],
+                            })
+                            .await?;
+                        return Ok(());
+                    }
+                };
+
+                let AuthenticatedHandshake {
+                    session_id,
+                    tunnel_id,
+                    negotiated_version,
+                    token,
+                    capabilities,
+                } = auth;
+
+                // Create QUIC multiplexer for data streams
+                let quic_mux = QuicMultiplexer::new(connection.clone(), false);
+
+                let session = Session::new(
+                    session_id,
+                    tunnel_id.clone(),
+                    addr,
+                    token,
+                    capabilities,
+                    Some(AnyMultiplexer::Quic(quic_mux.clone())),
+                );
+
+                if let Err(e) = sessions.add(session) {
+                    warn!("Failed to register QUIC session: {}", e);
+                    ctrl_framed_send
+                        .send(Frame::HandshakeAck {
+                            status: HandshakeStatus::TunnelIdTaken,
+                            session_id,
+                            version: 0,
+                            server_capabilities: vec![],
+                        })
+                        .await?;
+                    return Err(TunnelError::Protocol(format!(
+                        "Tunnel ID '{tunnel_id}' already in use"
+                    )));
+                }
+
+                info!("QUIC session established: {}", session_id);
+                ctrl_framed_send
+                    .send(Frame::HandshakeAck {
+                        status: HandshakeStatus::Success,
+                        session_id,
+                        version: negotiated_version,
+                        server_capabilities: vec!["basic".to_string(), "quic".to_string()],
+                    })
+                    .await?;
+
+                (session_id, tunnel_id, quic_mux)
+            }
+            _ => {
+                return Err(TunnelError::Protocol(
+                    "Expected handshake on QUIC control stream".into(),
+                ));
+            }
+        };
+
+        // 2. Run control loop (heartbeats) and data stream acceptance in parallel
+        let ctrl_result = tokio::select! {
+            result = Self::quic_control_loop(
+                &mut ctrl_framed_recv,
+                &mut ctrl_framed_send,
+                session_id,
+                &sessions,
+            ) => result,
+            result = Self::quic_data_stream_loop(&multiplexer) => result,
+            _ = connection.closed() => {
+                info!("QUIC connection closed for session {}", session_id);
+                Ok(())
+            }
+        };
+
+        // Cleanup
+        sessions.remove(&session_id);
+        info!(
+            "QUIC client disconnected: {} (tunnel: {})",
+            session_id, tunnel_id
+        );
+        ctrl_result
+    }
+
+    /// Process control frames (heartbeat/ack) on the dedicated control stream.
+    async fn quic_control_loop(
+        ctrl_recv: &mut tokio_util::codec::FramedRead<quinn::RecvStream, TunnelCodec>,
+        ctrl_send: &mut tokio_util::codec::FramedWrite<quinn::SendStream, TunnelCodec>,
+        session_id: Uuid,
+        sessions: &SessionStoreBackend,
+    ) -> Result<()> {
+        loop {
+            let frame = ctrl_recv
+                .next()
+                .await
+                .ok_or_else(|| TunnelError::Connection("QUIC control stream closed".into()))?
+                .map_err(TunnelError::Io)?;
+
+            // Update heartbeat for any activity
+            if let Some(mut session) = sessions.get_mut(&session_id) {
+                session.update_heartbeat();
+            } else {
+                return Err(TunnelError::Protocol("Session not found".into()));
+            }
+
+            match frame {
+                Frame::Heartbeat { .. } => {
+                    let ts = clamp_u128_to_u64(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                    );
+                    ctrl_send
+                        .send(Frame::HeartbeatAck { timestamp: ts })
+                        .await?;
+                }
+                _ => {
+                    warn!("Unexpected frame on QUIC control stream: {:?}", frame);
+                }
+            }
+        }
+    }
+
+    /// Accept data streams from QUIC and log them.
+    /// In the full implementation, these streams are used by the HTTP ingress
+    /// to forward requests to the tunnel client.
+    async fn quic_data_stream_loop(multiplexer: &QuicMultiplexer) -> Result<()> {
+        loop {
+            match multiplexer.accept_stream().await {
+                Ok(_stream) => {
+                    warn!("Server received data stream from QUIC client (not expected in current flow)");
+                }
+                Err(e) => {
+                    // Connection closed
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+/// Result of a successful handshake authentication.
+struct AuthenticatedHandshake {
+    session_id: Uuid,
+    tunnel_id: String,
+    negotiated_version: u8,
+    token: String,
+    capabilities: Vec<String>,
+}
+
+/// Validate and authenticate a handshake frame.
+/// Returns the authenticated handshake info, or a HandshakeStatus error.
+fn authenticate_handshake(
+    handshake: HandshakeFrame,
+    expected_token: &str,
+    addr: SocketAddr,
+) -> std::result::Result<AuthenticatedHandshake, HandshakeStatus> {
+    let HandshakeFrame {
+        min_version,
+        max_version,
+        token,
+        tunnel_id,
+        capabilities,
+    } = handshake;
+
+    if let Err(e) = validate_token_format(&token, 256) {
+        warn!("Invalid token format from {}: {}", addr, e);
+        return Err(HandshakeStatus::InvalidToken);
+    }
+
+    if !constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
+        warn!("Invalid token from {}", addr);
+        return Err(HandshakeStatus::InvalidToken);
+    }
+
+    let negotiated_version = match negotiate_version(min_version, max_version) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Version negotiation failed for {}: {}", addr, e);
+            return Err(HandshakeStatus::VersionMismatch);
+        }
+    };
+
+    info!(
+        "Client {} supports v{}-{}, negotiated v{}",
+        addr, min_version, max_version, negotiated_version
+    );
+
+    let session_id = Uuid::new_v4();
+    let tunnel_id = tunnel_id.unwrap_or_else(|| session_id.to_string());
+
+    Ok(AuthenticatedHandshake {
+        session_id,
+        tunnel_id,
+        negotiated_version,
+        token,
+        capabilities,
+    })
 }
 
 /// Negotiate protocol version between client and server
