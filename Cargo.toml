@@ -57,6 +57,8 @@ ferrotunnel-observability = { version = "1.0.7", path = "ferrotunnel-observabili
 
 # QUIC transport
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+h3 = { version = "0.0.8" }
+h3-quinn = { version = "0.0.10" }
 
 # High-performance allocator
 mimalloc = { version = "0.1", default-features = false }

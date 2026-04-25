@@ -7,6 +7,8 @@
 mod concurrent_test;
 mod error_test;
 mod grpc_test;
+#[cfg(feature = "http3")]
+mod http3_test;
 mod multi_client_test;
 mod plugin_test;
 #[cfg(feature = "quic")]

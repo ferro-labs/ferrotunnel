@@ -7,6 +7,8 @@ use ferrotunnel_common::{
     Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR, DEFAULT_TUNNEL_PORT,
 };
 use std::net::SocketAddr;
+#[cfg(feature = "http3")]
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Configuration for the tunnel client.
@@ -73,6 +75,18 @@ pub struct ServerConfig {
     /// Address to bind the HTTP ingress
     pub http_bind_addr: SocketAddr,
 
+    /// Optional address to bind HTTP/3 ingress (UDP)
+    #[cfg(feature = "http3")]
+    pub http3_bind_addr: Option<SocketAddr>,
+
+    /// Path to certificate file for HTTP/3 ingress
+    #[cfg(feature = "http3")]
+    pub http3_cert_path: Option<PathBuf>,
+
+    /// Path to private key file for HTTP/3 ingress
+    #[cfg(feature = "http3")]
+    pub http3_key_path: Option<PathBuf>,
+
     /// Authentication token (clients must provide this)
     pub token: String,
 }
@@ -83,6 +97,14 @@ impl ServerConfig {
         if self.token.is_empty() {
             return Err(TunnelError::Config("token is required".into()));
         }
+        #[cfg(feature = "http3")]
+        if self.http3_bind_addr.is_some()
+            && (self.http3_cert_path.is_none() || self.http3_key_path.is_none())
+        {
+            return Err(TunnelError::Config(
+                "HTTP/3 ingress requires certificate and key paths".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -92,6 +114,12 @@ impl Default for ServerConfig {
         Self {
             bind_addr: ([0, 0, 0, 0], DEFAULT_TUNNEL_PORT).into(),
             http_bind_addr: ([0, 0, 0, 0], DEFAULT_HTTP_PORT).into(),
+            #[cfg(feature = "http3")]
+            http3_bind_addr: None,
+            #[cfg(feature = "http3")]
+            http3_cert_path: None,
+            #[cfg(feature = "http3")]
+            http3_key_path: None,
             token: String::new(),
         }
     }

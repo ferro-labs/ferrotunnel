@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-04-26
+
+### Added
+
+#### HTTP/3 Ingress
+- **HTTP/3 ingress**: Optional browser-facing HTTP/3 listener over QUIC/TLS 1.3 using `h3` and `h3-quinn`, gated behind the `http3` feature flag
+- **`Http3Ingress` / `Http3IngressConfig`**: New server-side HTTP/3 ingress in `ferrotunnel-http` that accepts public HTTP/3 requests, normalizes `Host`/authority, and routes through the existing tunnel session store
+- **Strict host-based routing for HTTP/3**: HTTP/3 ingress uses the same normalized `Host` lookup behavior as HTTP/1.1 and HTTP/2 ingress; unknown hosts return `404 Tunnel not found`
+- **Alt-Svc advertisement**: TCP HTTP ingress can advertise the configured HTTP/3 UDP endpoint with `Alt-Svc` when HTTP/3 is enabled
+- **Public server API**: Added feature-gated `.http3(bind_addr, cert_path, key_path)` support on `ServerBuilder`
+- **CLI flags** (gated behind `--features http3`):
+  - Server: `--http3-bind`, `--http3-cert`, `--http3-key`
+- **Deployment and README docs**: Added HTTP/3 usage, feature, CLI, firewall/UDP, TLS certificate, and architecture notes across the root, crate, CLI, HTTP, and deployment documentation
+- **Integration tests**: Added end-to-end HTTP/3 tunnel coverage plus strict unknown-host routing coverage in `ferrotunnel-tests`
+
+#### Dependencies
+- **h3** 0.0.8 and **h3-quinn** 0.0.10 (optional, `http3` feature): HTTP/3 protocol support on top of the existing Quinn/rustls stack
+
 ## [1.0.7] - 2026-04-09
 
 ### Added

@@ -86,9 +86,37 @@ export FERROTUNNEL_TLS_KEY="/etc/ferrotunnel/server.key"
 export FERROTUNNEL_TLS_CA="/etc/ferrotunnel/ca.crt"       # For client auth
 export FERROTUNNEL_TLS_CLIENT_AUTH="true"                  # Require client certs
 
+# HTTP/3 ingress (optional, requires the http3 feature and UDP reachability)
+export FERROTUNNEL_HTTP3_BIND="0.0.0.0:8443"
+export FERROTUNNEL_HTTP3_CERT="/etc/ferrotunnel/server.crt" # Defaults to TLS cert
+export FERROTUNNEL_HTTP3_KEY="/etc/ferrotunnel/server.key"  # Defaults to TLS key
+
 # Performance
 export FERROTUNNEL_OBSERVABILITY="true"          # Enable metrics/tracing
 ```
+
+### HTTP/3 Ingress
+
+HTTP/3 ingress is available when the binary is built with the `http3` feature.
+It listens on UDP and runs alongside the existing HTTP/1.1 and HTTP/2 TCP
+ingress. When enabled, the TCP ingress advertises the HTTP/3 endpoint with an
+`Alt-Svc` header so compatible clients can upgrade automatically.
+
+```bash
+cargo build -p ferrotunnel-cli --features http3
+
+ferrotunnel server \
+  --bind 0.0.0.0:7835 \
+  --http-bind 0.0.0.0:8080 \
+  --http3-bind 0.0.0.0:8443 \
+  --tls-cert /etc/ferrotunnel/server.crt \
+  --tls-key /etc/ferrotunnel/server.key \
+  --token "your-secret-token"
+```
+
+Allow UDP traffic to the HTTP/3 bind port in firewalls and load balancers. The
+HTTP/3 listener uses the same strict `Host`-based tunnel routing as the existing
+HTTP ingress.
 
 ### Client Environment Variables
 

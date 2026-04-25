@@ -45,8 +45,12 @@ ferrotunnel server --token my-secret-token
 | `--quic-bind`* | `FERROTUNNEL_QUIC_BIND` | - | QUIC endpoint address (UDP) |
 | `--quic-cert`* | `FERROTUNNEL_QUIC_CERT` | - | TLS cert for QUIC (falls back to `--tls-cert`) |
 | `--quic-key`* | `FERROTUNNEL_QUIC_KEY` | - | TLS key for QUIC (falls back to `--tls-key`) |
+| `--http3-bind`** | `FERROTUNNEL_HTTP3_BIND` | - | HTTP/3 ingress address (UDP) |
+| `--http3-cert`** | `FERROTUNNEL_HTTP3_CERT` | - | TLS cert for HTTP/3 (falls back to `--tls-cert`) |
+| `--http3-key`** | `FERROTUNNEL_HTTP3_KEY` | - | TLS key for HTTP/3 (falls back to `--tls-key`) |
 
 *\* Requires `--features quic` at build time.*
+*\*\* Requires `--features http3` at build time.*
 
 ### Client
 
@@ -139,6 +143,24 @@ ferrotunnel server --token secret \
 ferrotunnel client --server 127.0.0.1:7836 --token secret \
   --quic --tls-skip-verify
 ```
+
+### With HTTP/3 Ingress
+
+```bash
+# Build with HTTP/3 ingress support
+cargo install ferrotunnel-cli --features http3
+
+# HTTP/1.1 + HTTP/2 ingress on TCP :8080; HTTP/3 ingress on UDP :8443
+ferrotunnel server --token secret \
+  --http-bind 0.0.0.0:8080 \
+  --http3-bind 0.0.0.0:8443 \
+  --tls-cert server.crt \
+  --tls-key server.key
+```
+
+When enabled, FerroTunnel adds `Alt-Svc` to HTTP ingress responses so compatible
+clients can discover the HTTP/3 UDP endpoint. The HTTP/3 ingress uses the same
+strict `Host`-based tunnel routing as the regular HTTP ingress.
 
 ### Using Environment Variables
 

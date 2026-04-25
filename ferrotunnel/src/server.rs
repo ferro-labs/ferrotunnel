@@ -23,8 +23,12 @@ use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_core::transport::{tls::TlsTransportConfig, TransportConfig};
 use ferrotunnel_core::TunnelServer;
 use ferrotunnel_http::HttpIngress;
+#[cfg(feature = "http3")]
+use ferrotunnel_http::{Http3Ingress, Http3IngressConfig};
 use ferrotunnel_plugin::PluginRegistry;
 use std::net::SocketAddr;
+#[cfg(feature = "http3")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tokio::task::JoinHandle;
@@ -74,6 +78,7 @@ impl Server {
     /// # Errors
     ///
     /// Returns an error if the server is already running.
+    #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> Result<()> {
         if self.task.is_some() {
             return Err(TunnelError::InvalidState("server already started".into()));
@@ -86,6 +91,10 @@ impl Server {
         info!("Starting `FerroTunnel` Server");
         info!("  Tunnel bind: {}", config.bind_addr);
         info!("  HTTP bind: {}", config.http_bind_addr);
+        #[cfg(feature = "http3")]
+        if let Some(http3_bind_addr) = config.http3_bind_addr {
+            info!("  HTTP/3 bind: {} (UDP)", http3_bind_addr);
+        }
 
         let tunnel_server = TunnelServer::new(config.bind_addr, config.token)
             .with_transport(self.transport_config.clone());
@@ -105,7 +114,19 @@ impl Server {
 
         let registry = Arc::new(registry);
         let sessions = tunnel_server.sessions();
-        let ingress = HttpIngress::new(config.http_bind_addr, sessions, registry);
+        #[cfg(feature = "http3")]
+        let alt_svc_header = config.http3_bind_addr.and_then(|addr| {
+            Http3IngressConfig::default()
+                .alt_svc_header_value(addr)
+                .ok()
+        });
+
+        let mut ingress =
+            HttpIngress::new(config.http_bind_addr, sessions.clone(), registry.clone());
+        #[cfg(feature = "http3")]
+        if let Some(value) = alt_svc_header {
+            ingress = ingress.with_alt_svc_header(value);
+        }
 
         // Spawn both services
         #[cfg(feature = "quic")]
@@ -124,7 +145,56 @@ impl Server {
         let tunnel_handle = tokio::spawn(async move { tunnel_server.run().await });
         let ingress_handle = tokio::spawn(async move { ingress.start().await });
 
+        #[cfg(feature = "http3")]
+        let http3_handle = if let Some(http3_bind_addr) = config.http3_bind_addr {
+            let cert_path = config.http3_cert_path.clone().ok_or_else(|| {
+                TunnelError::Config("HTTP/3 ingress requires certificate path".into())
+            })?;
+            let key_path = config
+                .http3_key_path
+                .clone()
+                .ok_or_else(|| TunnelError::Config("HTTP/3 ingress requires key path".into()))?;
+            let http3_config = Http3IngressConfig {
+                cert_path: cert_path.to_string_lossy().to_string(),
+                key_path: key_path.to_string_lossy().to_string(),
+                ..Default::default()
+            };
+            let http3_ingress =
+                Http3Ingress::new(http3_bind_addr, sessions, registry, http3_config);
+            Some(tokio::spawn(async move { http3_ingress.start().await }))
+        } else {
+            None
+        };
+
         // Wait for shutdown or either service to exit
+        #[cfg(feature = "http3")]
+        if let Some(http3_handle) = http3_handle {
+            tokio::select! {
+                result = tunnel_handle => {
+                    match result {
+                        Ok(inner) => inner?,
+                        Err(e) => return Err(TunnelError::Connection(format!("Tunnel task panicked: {e}"))),
+                    }
+                }
+                result = ingress_handle => {
+                    match result {
+                        Ok(inner) => inner?,
+                        Err(e) => return Err(TunnelError::Connection(format!("Ingress task panicked: {e}"))),
+                    }
+                }
+                result = http3_handle => {
+                    match result {
+                        Ok(inner) => inner?,
+                        Err(e) => return Err(TunnelError::Connection(format!("HTTP/3 ingress task panicked: {e}"))),
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!("Server shutdown requested");
+                }
+            }
+            return Ok(());
+        }
+
         tokio::select! {
             result = tunnel_handle => {
                 match result {
@@ -208,6 +278,23 @@ impl ServerBuilder {
     #[must_use]
     pub fn http_bind(mut self, addr: SocketAddr) -> Self {
         self.config.http_bind_addr = addr;
+        self
+    }
+
+    /// Enable HTTP/3 ingress on the given UDP address.
+    ///
+    /// HTTP/3 requires a TLS certificate and private key for QUIC.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn http3(
+        mut self,
+        addr: SocketAddr,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.config.http3_bind_addr = Some(addr);
+        self.config.http3_cert_path = Some(cert_path.into());
+        self.config.http3_key_path = Some(key_path.into());
         self
     }
 

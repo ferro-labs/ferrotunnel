@@ -25,6 +25,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [features]
+http3 = ["ferrotunnel-http/http3"]
 quic = ["ferrotunnel-core/quic"]
 
 [dev-dependencies]

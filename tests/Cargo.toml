@@ -45,8 +45,11 @@ tokio-tungstenite = "0.28"
 futures-util = "0.3"
 
 quinn = { workspace = true, optional = true }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
 
 [features]
+http3 = ["dep:h3", "dep:h3-quinn", "ferrotunnel-http/http3", "ferrotunnel/http3"]
 quic = ["dep:quinn", "ferrotunnel-core/quic", "ferrotunnel/quic"]
 
 [lints]

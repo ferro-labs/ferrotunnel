@@ -58,6 +58,7 @@ mimalloc = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [features]
+http3 = ["ferrotunnel-http/http3"]
 quic = ["ferrotunnel-core/quic"]
 
 [lints]
