@@ -87,13 +87,11 @@ pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), Va
                 }
             }
         }
-        Frame::Data { data, .. } => {
-            if data.len() > limits.max_payload_bytes {
-                return Err(ValidationError::PayloadTooLarge {
-                    size: data.len(),
-                    limit: limits.max_payload_bytes,
-                });
-            }
+        Frame::Data { data, .. } if data.len() > limits.max_payload_bytes => {
+            return Err(ValidationError::PayloadTooLarge {
+                size: data.len(),
+                limit: limits.max_payload_bytes,
+            });
         }
         _ => {}
     }
