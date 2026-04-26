@@ -32,7 +32,7 @@ impl Default for TcpIngressConfig {
         Self {
             max_connections: 1000,
             connection_timeout: Duration::from_secs(10),
-            idle_timeout: Duration::from_secs(300),
+            idle_timeout: Duration::from_mins(5),
             buffer_size: 64 * 1024,
         }
     }
@@ -212,7 +212,7 @@ mod tests {
         let config = TcpIngressConfig::default();
         assert_eq!(config.max_connections, 1000);
         assert_eq!(config.connection_timeout, Duration::from_secs(10));
-        assert_eq!(config.idle_timeout, Duration::from_secs(300));
+        assert_eq!(config.idle_timeout, Duration::from_mins(5));
         assert_eq!(config.buffer_size, 64 * 1024);
     }
 
@@ -231,7 +231,7 @@ mod tests {
         let config = TcpIngressConfig {
             max_connections: 500,
             connection_timeout: Duration::from_secs(5),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             buffer_size: 32 * 1024,
         };
         let ingress = TcpIngress::with_config(addr, sessions, config.clone());

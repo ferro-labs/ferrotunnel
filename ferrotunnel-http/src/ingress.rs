@@ -37,7 +37,7 @@ impl Default for IngressConfig {
             max_connections: 10000,
             max_response_size: 100 * 1024 * 1024, // 100MB
             handshake_timeout: Duration::from_secs(10),
-            response_timeout: Duration::from_secs(60),
+            response_timeout: Duration::from_mins(1),
             alt_svc_header: None,
         }
     }

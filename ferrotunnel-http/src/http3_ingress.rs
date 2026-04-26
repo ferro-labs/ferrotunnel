@@ -59,7 +59,7 @@ impl Default for Http3IngressConfig {
             max_request_body_size: 100 * 1024 * 1024,
             max_response_size: 100 * 1024 * 1024,
             handshake_timeout: Duration::from_secs(10),
-            response_timeout: Duration::from_secs(60),
+            response_timeout: Duration::from_mins(1),
             alt_svc_max_age: 86_400,
             idle_timeout: Duration::from_secs(30),
             keep_alive_interval: Duration::from_secs(10),

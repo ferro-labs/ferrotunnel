@@ -244,11 +244,11 @@ mod tests {
     fn test_pool_config_custom() {
         let config = PoolConfig {
             max_idle_per_host: 10,
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             prefer_h2: true,
         };
         assert_eq!(config.max_idle_per_host, 10);
-        assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        assert_eq!(config.idle_timeout, Duration::from_mins(1));
         assert!(config.prefer_h2);
     }
 }
