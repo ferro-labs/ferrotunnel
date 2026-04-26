@@ -12,8 +12,8 @@ keywords = ["tunnel", "networking", "async", "core"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-ferrotunnel-common = { version = "1.0.7", path = "../ferrotunnel-common" }
-ferrotunnel-protocol = { version = "1.0.7", path = "../ferrotunnel-protocol" }
+ferrotunnel-common = { version = "1.0.8", path = "../ferrotunnel-common" }
+ferrotunnel-protocol = { version = "1.0.8", path = "../ferrotunnel-protocol" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -54,7 +54,7 @@ crossbeam-queue = "0.3"
 quinn = { workspace = true, optional = true }
 
 # Optional metrics (decode/encode latency, queue depth)
-ferrotunnel-observability = { version = "1.0.7", path = "../ferrotunnel-observability", optional = true }
+ferrotunnel-observability = { version = "1.0.8", path = "../ferrotunnel-observability", optional = true }
 
 [features]
 default = []
