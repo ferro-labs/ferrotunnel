@@ -20,7 +20,7 @@ impl Default for BackoffConfig {
     fn default() -> Self {
         Self {
             base: Duration::from_secs(1),
-            max: Duration::from_secs(60),
+            max: Duration::from_mins(1),
             factor: 2.0,
             jitter: 0.3,
         }
@@ -169,7 +169,7 @@ mod tests {
     fn test_backoff_growth() {
         let config = BackoffConfig {
             base: Duration::from_secs(1),
-            max: Duration::from_secs(60),
+            max: Duration::from_mins(1),
             factor: 2.0,
             jitter: 0.0, // No jitter for predictable test
         };

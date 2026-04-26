@@ -96,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [beta, "1.90"]
+        rust: [beta, "1.91"]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
