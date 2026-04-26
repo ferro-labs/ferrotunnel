@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
 
     // Metrics report loop
     let start_time = Instant::now();
-    let mut report_interval = interval(Duration::from_secs(60));
+    let mut report_interval = interval(Duration::from_mins(1));
     let mut metrics_file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -157,7 +157,7 @@ async fn run_traffic_cycle(tunnel: &str, token: &str, _target: &str, stats: &Sta
 
     // In a real soak test, we'd also want to generate traffic THROUGH the tunnel
     // For now, we simulate session duration
-    let traffic_duration = Duration::from_secs(300); // 5 mins per connection
+    let traffic_duration = Duration::from_mins(5); // 5 mins per connection
 
     // Simulate some bytes
     stats.total_bytes.fetch_add(1024 * 1024, Ordering::Relaxed);

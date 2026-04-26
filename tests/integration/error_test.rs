@@ -74,7 +74,7 @@ async fn test_upstream_timeout() {
                 tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
                     let _ = socket.read(&mut buf).await;
-                    tokio::time::sleep(Duration::from_secs(60)).await; // Very long sleep
+                    tokio::time::sleep(Duration::from_mins(1)).await; // Very long sleep
                 });
             }
         }
