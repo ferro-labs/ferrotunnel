@@ -7,22 +7,27 @@ use ferrotunnel_plugin::{PluginAction, PluginRegistry, RequestContext, ResponseC
 use ferrotunnel_protocol::frame::Protocol;
 use h3::quic::{BidiStream, RecvStream, SendStream};
 use h3_quinn::quinn::{Endpoint, ServerConfig, TransportConfig, VarInt};
-use http_body_util::{BodyExt, Empty};
-use hyper::body::Incoming;
+use http_body_util::BodyExt;
+use hyper::body::Frame;
 use hyper::header::{HeaderName, HeaderValue, CONNECTION, HOST, TRANSFER_ENCODING, UPGRADE};
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 const H3_ALPN: &[u8] = b"h3";
-const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
+// Section 12.5: #[non_exhaustive] for semver-safe config evolution.
+// Construct via `Http3IngressConfig::default()` + struct update syntax.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct Http3IngressConfig {
     pub cert_path: String,
@@ -35,6 +40,12 @@ pub struct Http3IngressConfig {
     pub handshake_timeout: Duration,
     pub response_timeout: Duration,
     pub alt_svc_max_age: u64,
+    /// QUIC connection idle timeout (Section 2)
+    pub idle_timeout: Duration,
+    /// QUIC keep-alive interval (Section 2)
+    pub keep_alive_interval: Duration,
+    /// Maximum concurrent bidirectional streams per connection (Section 7)
+    pub max_concurrent_bidi_streams: u32,
 }
 
 impl Default for Http3IngressConfig {
@@ -45,34 +56,158 @@ impl Default for Http3IngressConfig {
             ca_cert_path: None,
             client_auth: false,
             max_connections: 10_000,
-            max_request_body_size: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            max_request_body_size: 100 * 1024 * 1024,
             max_response_size: 100 * 1024 * 1024,
             handshake_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(60),
             alt_svc_max_age: 86_400,
+            idle_timeout: Duration::from_secs(30),
+            keep_alive_interval: Duration::from_secs(10),
+            max_concurrent_bidi_streams: 256,
         }
     }
 }
 
 impl Http3IngressConfig {
+    /// Create a config with the required TLS certificate paths; all other
+    /// fields use their defaults.
+    #[must_use]
+    pub fn with_certs(cert_path: String, key_path: String) -> Self {
+        Self {
+            cert_path,
+            key_path,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn ca_cert_path(mut self, path: Option<String>) -> Self {
+        self.ca_cert_path = path;
+        self
+    }
+
+    #[must_use]
+    pub fn client_auth(mut self, enabled: bool) -> Self {
+        self.client_auth = enabled;
+        self
+    }
+
+    /// Builds an `Alt-Svc` header advertising both `h3` and `h3-29` (Section 12.6).
     pub fn alt_svc_header_value(
         &self,
         addr: SocketAddr,
     ) -> std::result::Result<HeaderValue, String> {
+        let port = addr.port();
+        let ma = self.alt_svc_max_age;
         HeaderValue::from_str(&format!(
-            "h3=\":{}\"; ma={}",
-            addr.port(),
-            self.alt_svc_max_age
+            "h3=\":{port}\"; ma={ma}, h3-29=\":{port}\"; ma={ma}"
         ))
         .map_err(|e| format!("invalid Alt-Svc value: {e}"))
     }
 }
 
+// ---------------------------------------------------------------------------
+// Section 1: Streaming request body via channel
+// ---------------------------------------------------------------------------
+
+struct Http3RequestBody {
+    receiver: tokio::sync::mpsc::Receiver<std::result::Result<Bytes, io::Error>>,
+    bytes_read: usize,
+    max_size: usize,
+}
+
+impl hyper::body::Body for Http3RequestBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match this.receiver.poll_recv(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.bytes_read += bytes.len();
+                if this.bytes_read > this.max_size {
+                    Poll::Ready(Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "body too large",
+                    ))))
+                } else {
+                    Poll::Ready(Some(Ok(Frame::data(bytes))))
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+type BodyChunkReceiver = tokio::sync::mpsc::Receiver<std::result::Result<Bytes, io::Error>>;
+type StreamReturnReceiver<S> = tokio::sync::oneshot::Receiver<h3::server::RequestStream<S, Bytes>>;
+
+fn spawn_body_reader<S>(
+    mut h3_stream: h3::server::RequestStream<S, Bytes>,
+    max_size: usize,
+) -> (BodyChunkReceiver, StreamReturnReceiver<S>)
+where
+    S: BidiStream<Bytes> + Send + 'static,
+    S::RecvStream: RecvStream + Send,
+    S::SendStream: SendStream<Bytes> + Send,
+{
+    let (body_tx, body_rx) = tokio::sync::mpsc::channel(8);
+    let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let mut bytes_read = 0usize;
+        loop {
+            match h3_stream.recv_data().await {
+                Ok(Some(mut chunk)) => {
+                    let len = chunk.remaining();
+                    if len == 0 {
+                        continue;
+                    }
+                    // Pre-validate remaining budget before copy_to_bytes (Section 1.4)
+                    if bytes_read.saturating_add(len) > max_size {
+                        let _ = body_tx
+                            .send(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "body too large",
+                            )))
+                            .await;
+                        break;
+                    }
+                    bytes_read += len;
+                    let bytes = chunk.copy_to_bytes(len);
+                    if body_tx.send(Ok(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = body_tx
+                        .send(Err(io::Error::other(format!("h3 recv error: {e}"))))
+                        .await;
+                    break;
+                }
+            }
+        }
+        let _ = stream_tx.send(h3_stream);
+    });
+
+    (body_rx, stream_rx)
+}
+
+// ---------------------------------------------------------------------------
+// Http3Ingress
+// ---------------------------------------------------------------------------
+
 pub struct Http3Ingress {
     addr: SocketAddr,
     sessions: SessionStoreBackend,
     registry: Arc<PluginRegistry>,
-    config: Http3IngressConfig,
+    config: Arc<Http3IngressConfig>,
     connection_semaphore: Arc<Semaphore>,
 }
 
@@ -89,54 +224,88 @@ impl Http3Ingress {
             addr,
             sessions,
             registry,
-            config,
+            config: Arc::new(config),
             connection_semaphore,
         }
     }
 
+    /// Start the HTTP/3 ingress (blocks forever).
     pub async fn start(self) -> Result<()> {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        // Never fires — start_with_shutdown with a parked receiver.
+        drop(tx);
+        self.start_with_shutdown(rx).await
+    }
+
+    /// Start the HTTP/3 ingress with an external shutdown signal (Section 10).
+    pub async fn start_with_shutdown(
+        self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<()> {
         let endpoint = create_http3_endpoint(&self.config, self.addr)?;
         info!("HTTP/3 Ingress listening on {} (UDP)", self.addr);
 
         loop {
-            let Some(incoming) = endpoint.accept().await else {
-                return Err(TunnelError::Connection("HTTP/3 endpoint closed".into()));
-            };
-            let peer_addr = incoming.remote_address();
-
-            let Ok(permit) = self.connection_semaphore.clone().try_acquire_owned() else {
-                warn!(
-                    "Max HTTP/3 connections reached, rejecting connection from {}",
-                    peer_addr
-                );
-                continue;
-            };
-
-            let sessions = self.sessions.clone();
-            let registry = self.registry.clone();
-            let config = self.config.clone();
-
-            tokio::spawn(async move {
-                let _permit = permit;
-                let connection = match incoming.await {
-                    Ok(connection) => connection,
-                    Err(e) => {
-                        error!("HTTP/3 QUIC handshake failed from {peer_addr}: {e}");
-                        return;
-                    }
-                };
-
-                if let Err(e) =
-                    handle_connection(connection, sessions, registry, peer_addr, config).await
-                {
-                    error!("HTTP/3 connection error from {peer_addr}: {e}");
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    info!("HTTP/3 ingress shutting down, draining...");
+                    endpoint.close(VarInt::from_u32(0), b"server shutdown");
+                    endpoint.wait_idle().await;
+                    return Ok(());
                 }
-            });
+                accepted = endpoint.accept() => {
+                    let Some(incoming) = accepted else {
+                        return Err(TunnelError::Connection("HTTP/3 endpoint closed".into()));
+                    };
+                    let peer_addr = incoming.remote_address();
+
+                    let Ok(permit) = self.connection_semaphore.clone().try_acquire_owned() else {
+                        // Section 8: structured warn with peer_addr and limit
+                        warn!(
+                            peer = %peer_addr,
+                            max = self.config.max_connections,
+                            "HTTP/3 max_connections reached, rejecting"
+                        );
+                        continue;
+                    };
+
+                    let sessions = self.sessions.clone();
+                    let registry = self.registry.clone();
+                    let config = Arc::clone(&self.config);
+
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let connection = match incoming.await {
+                            Ok(connection) => connection,
+                            Err(e) => {
+                                error!("HTTP/3 QUIC handshake failed from {peer_addr}: {e}");
+                                return;
+                            }
+                        };
+
+                        if let Err(e) =
+                            handle_connection(connection, sessions, registry, peer_addr, config)
+                                .await
+                        {
+                            error!("HTTP/3 connection error from {peer_addr}: {e}");
+                        }
+                    });
+                }
+            }
         }
     }
 }
 
 fn create_http3_endpoint(config: &Http3IngressConfig, bind_addr: SocketAddr) -> Result<Endpoint> {
+    // Section 3: rustls 0.23 requires an explicit crypto provider;
+    // ferrotunnel standardizes on ring (see AGENTS.md).
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+
     if config.cert_path.is_empty() || config.key_path.is_empty() {
         return Err(TunnelError::Config(
             "HTTP/3 ingress requires certificate and key paths".into(),
@@ -159,13 +328,16 @@ fn create_http3_endpoint(config: &Http3IngressConfig, bind_addr: SocketAddr) -> 
         .map_err(|e| TunnelError::Tls(format!("HTTP/3 QUIC server config: {e}")))?;
 
     let mut transport = TransportConfig::default();
+    // Section 2: idle_timeout is connection-scoped; response_timeout is request-scoped only.
     transport.max_idle_timeout(Some(
         config
-            .response_timeout
+            .idle_timeout
             .try_into()
-            .map_err(|e| TunnelError::Config(format!("HTTP/3 idle timeout: {e}")))?,
+            .map_err(|e| TunnelError::Config(format!("idle_timeout: {e}")))?,
     ));
-    transport.max_concurrent_bidi_streams(VarInt::from_u32(256));
+    transport.keep_alive_interval(Some(config.keep_alive_interval));
+    // Section 7: configurable bidi stream limit
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(config.max_concurrent_bidi_streams));
 
     let mut server_config = ServerConfig::with_crypto(Arc::new(crypto));
     server_config.transport_config(Arc::new(transport));
@@ -177,7 +349,7 @@ async fn handle_connection(
     sessions: SessionStoreBackend,
     registry: Arc<PluginRegistry>,
     peer_addr: SocketAddr,
-    config: Http3IngressConfig,
+    config: Arc<Http3IngressConfig>,
 ) -> std::result::Result<(), String> {
     let h3_connection = h3_quinn::Connection::new(connection);
     let mut h3_connection = h3::server::builder()
@@ -190,7 +362,7 @@ async fn handle_connection(
             Ok(Some(resolver)) => {
                 let sessions = sessions.clone();
                 let registry = registry.clone();
-                let config = config.clone();
+                let config = Arc::clone(&config);
                 tokio::spawn(async move {
                     let resolved = resolver.resolve_request().await;
                     let (req, stream) = match resolved {
@@ -201,7 +373,7 @@ async fn handle_connection(
                         }
                     };
                     if let Err(e) =
-                        handle_request(req, stream, sessions, registry, peer_addr, config).await
+                        handle_request(req, stream, sessions, registry, peer_addr, &config).await
                     {
                         error!("HTTP/3 request handling failed: {e}");
                     }
@@ -213,14 +385,70 @@ async fn handle_connection(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+// ---------------------------------------------------------------------------
+// Request handling (Section 12.4: split into forward_via_h1 / forward_via_h2)
+// ---------------------------------------------------------------------------
+
+/// Result of running plugin request hooks. `Ok(req)` means proceed; `Err` means
+/// the plugin already sent a response on the stream.
+enum PluginResult {
+    Continue(Box<Request<()>>),
+    Handled,
+}
+
+async fn run_request_plugins<S>(
+    mut req: Request<()>,
+    h3_stream: &mut h3::server::RequestStream<S, Bytes>,
+    registry: &PluginRegistry,
+    ctx: &RequestContext,
+) -> std::result::Result<PluginResult, String>
+where
+    S: BidiStream<Bytes> + Send + 'static,
+    S::RecvStream: RecvStream + Send,
+    S::SendStream: SendStream<Bytes> + Send,
+{
+    match registry.execute_request_hooks(&mut req, ctx).await {
+        Ok(PluginAction::Continue) => Ok(PluginResult::Continue(Box::new(req))),
+        Ok(PluginAction::Modify { .. }) => Ok(PluginResult::Continue(Box::new(req))),
+        Ok(PluginAction::Reject { status, reason }) => {
+            let status_code = match StatusCode::from_u16(status) {
+                Ok(s) => s,
+                Err(_) => {
+                    warn!(status, "invalid plugin reject status, falling back to 403");
+                    StatusCode::FORBIDDEN
+                }
+            };
+            send_simple_response(h3_stream, status_code, Bytes::from(reason)).await?;
+            Ok(PluginResult::Handled)
+        }
+        Ok(PluginAction::Respond {
+            status,
+            headers,
+            body,
+        }) => {
+            send_plugin_response(h3_stream, status, headers, Bytes::from(body)).await?;
+            Ok(PluginResult::Handled)
+        }
+        Err(e) => {
+            error!("HTTP/3 plugin error: {e}");
+            send_simple_response(
+                h3_stream,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Bytes::from_static(b"Plugin processing error"),
+            )
+            .await?;
+            Ok(PluginResult::Handled)
+        }
+    }
+}
+
 async fn handle_request<S>(
     req: Request<()>,
     mut h3_stream: h3::server::RequestStream<S, Bytes>,
     sessions: SessionStoreBackend,
     registry: Arc<PluginRegistry>,
     peer_addr: SocketAddr,
-    config: Http3IngressConfig,
+    config: &Http3IngressConfig,
 ) -> std::result::Result<(), String>
 where
     S: BidiStream<Bytes> + Send + 'static,
@@ -232,7 +460,9 @@ where
             .await;
     }
 
-    let host = host_header_value(&req).ok_or("Missing or invalid Host header")?;
+    let host = host_header_value(&req)
+        .ok_or("Missing or invalid Host header")?
+        .clone();
     let tunnel_id = parse_and_normalize_host(Some(&host)).map_err(str::to_string)?;
 
     let ctx = RequestContext {
@@ -242,53 +472,31 @@ where
         timestamp: SystemTime::now(),
     };
 
-    let mut plugin_req = req;
-    match registry.execute_request_hooks(&mut plugin_req, &ctx).await {
-        Ok(PluginAction::Continue | PluginAction::Modify { .. }) => {}
-        Ok(PluginAction::Reject { status, reason }) => {
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
-                Bytes::from(reason),
-            )
-            .await;
-        }
-        Ok(PluginAction::Respond {
-            status,
-            headers,
-            body,
-        }) => {
-            return send_plugin_response(&mut h3_stream, status, headers, Bytes::from(body)).await;
-        }
-        Err(e) => {
-            error!("HTTP/3 plugin error: {e}");
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Bytes::from_static(b"Plugin processing error"),
-            )
-            .await;
-        }
-    }
+    let plugin_req = match run_request_plugins(req, &mut h3_stream, &registry, &ctx).await? {
+        PluginResult::Continue(r) => *r,
+        PluginResult::Handled => return Ok(()),
+    };
 
-    let multiplexer = if let Some(session) = sessions.get_by_tunnel_id(&tunnel_id) {
-        if let Some(multiplexer) = &session.multiplexer {
-            multiplexer.clone()
-        } else {
+    let multiplexer = match sessions.get_by_tunnel_id(&tunnel_id) {
+        Some(session) => match &session.multiplexer {
+            Some(m) => m.clone(),
+            None => {
+                return send_simple_response(
+                    &mut h3_stream,
+                    StatusCode::BAD_GATEWAY,
+                    Bytes::from_static(b"Tunnel not ready"),
+                )
+                .await;
+            }
+        },
+        None => {
             return send_simple_response(
                 &mut h3_stream,
-                StatusCode::BAD_GATEWAY,
-                Bytes::from_static(b"Tunnel not ready"),
+                StatusCode::NOT_FOUND,
+                Bytes::from_static(b"Tunnel not found"),
             )
             .await;
         }
-    } else {
-        return send_simple_response(
-            &mut h3_stream,
-            StatusCode::NOT_FOUND,
-            Bytes::from_static(b"Tunnel not found"),
-        )
-        .await;
     };
 
     let is_grpc = is_grpc(plugin_req.headers());
@@ -298,102 +506,63 @@ where
         Protocol::HTTP
     };
 
-    let request_body = match collect_h3_request_body(&mut h3_stream, config.max_request_body_size)
-        .await
-    {
-        Ok(body) => body,
-        Err(e) if e.contains("too large") => {
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Bytes::from(e),
-            )
-            .await;
-        }
-        Err(e) => {
-            error!("HTTP/3 request body error: {e}");
-            return send_simple_response(&mut h3_stream, StatusCode::BAD_REQUEST, Bytes::from(e))
-                .await;
-        }
+    let (body_rx, stream_rx) = spawn_body_reader(h3_stream, config.max_request_body_size);
+    let streaming_body = Http3RequestBody {
+        receiver: body_rx,
+        bytes_read: 0,
+        max_size: config.max_request_body_size,
     };
-    let forward_req = match build_forward_request(plugin_req, request_body, &host, is_grpc) {
+
+    let forward_req = match build_forward_request(plugin_req, streaming_body, &host, is_grpc) {
         Ok(req) => req,
         Err(e) => {
             error!("HTTP/3 request conversion error: {e}");
-            return send_simple_response(&mut h3_stream, StatusCode::BAD_REQUEST, Bytes::from(e))
-                .await;
+            if let Ok(mut stream) = stream_rx.await {
+                let _ = send_simple_response(&mut stream, StatusCode::BAD_REQUEST, Bytes::from(e))
+                    .await;
+            }
+            return Ok(());
         }
     };
 
-    let stream = match multiplexer.open_stream(protocol).await {
+    let tunnel_stream = match multiplexer.open_stream(protocol).await {
         Ok(stream) => stream,
         Err(e) => {
             error!("Failed to open HTTP/3 tunnel stream: {e}");
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Bytes::from_static(b"Failed to open stream"),
-            )
-            .await;
+            if let Ok(mut stream) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut stream,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Bytes::from_static(b"Failed to open stream"),
+                )
+                .await;
+            }
+            return Ok(());
         }
     };
-    let io = TokioIo::new(stream);
 
     if is_grpc {
-        let handshake_result = tokio::time::timeout(
-            config.handshake_timeout,
-            hyper::client::conn::http2::handshake(TokioExecutor::new(), io),
-        )
-        .await;
-        let (mut sender, conn) = match handshake_result {
-            Ok(Ok(handshake)) => handshake,
-            Ok(Err(e)) => {
-                error!("HTTP/3 gRPC tunnel handshake failed: {e}");
-                return send_simple_response(
-                    &mut h3_stream,
-                    StatusCode::BAD_GATEWAY,
-                    Bytes::from_static(b"gRPC tunnel handshake failed"),
-                )
-                .await;
-            }
-            Err(_) => {
-                error!("HTTP/3 gRPC tunnel handshake timeout");
-                return send_simple_response(
-                    &mut h3_stream,
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Bytes::from_static(b"gRPC tunnel handshake timeout"),
-                )
-                .await;
-            }
-        };
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-        let response_result =
-            tokio::time::timeout(config.response_timeout, sender.send_request(forward_req)).await;
-        let response = match response_result {
-            Ok(Ok(response)) => response,
-            Ok(Err(e)) => {
-                error!("HTTP/3 gRPC request failed: {e}");
-                return send_simple_response(
-                    &mut h3_stream,
-                    StatusCode::BAD_GATEWAY,
-                    Bytes::from_static(b"gRPC request failed"),
-                )
-                .await;
-            }
-            Err(_) => {
-                error!("HTTP/3 gRPC upstream response timeout");
-                return send_simple_response(
-                    &mut h3_stream,
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Bytes::from_static(b"gRPC upstream response timeout"),
-                )
-                .await;
-            }
-        };
-        return send_upstream_response(response, h3_stream, registry, ctx, config).await;
+        forward_via_h2(forward_req, stream_rx, tunnel_stream, registry, ctx, config).await
+    } else {
+        forward_via_h1(forward_req, stream_rx, tunnel_stream, registry, ctx, config).await
     }
+}
+
+/// Forward request to upstream via HTTP/1.1 and relay the response back over H3.
+async fn forward_via_h1<S>(
+    forward_req: Request<BoxBody>,
+    stream_rx: tokio::sync::oneshot::Receiver<h3::server::RequestStream<S, Bytes>>,
+    tunnel_stream: ferrotunnel_core::transport::BoxedStream,
+    registry: Arc<PluginRegistry>,
+    ctx: RequestContext,
+    config: &Http3IngressConfig,
+) -> std::result::Result<(), String>
+where
+    S: BidiStream<Bytes> + Send + 'static,
+    S::RecvStream: RecvStream + Send,
+    S::SendStream: SendStream<Bytes> + Send,
+{
+    let io = TokioIo::new(tunnel_stream);
 
     let handshake_result = tokio::time::timeout(
         config.handshake_timeout,
@@ -404,21 +573,27 @@ where
         Ok(Ok(handshake)) => handshake,
         Ok(Err(e)) => {
             error!("HTTP/3 tunnel handshake failed: {e}");
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::BAD_GATEWAY,
-                Bytes::from_static(b"Tunnel handshake failed"),
-            )
-            .await;
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::BAD_GATEWAY,
+                    Bytes::from_static(b"Tunnel handshake failed"),
+                )
+                .await;
+            }
+            return Ok(());
         }
         Err(_) => {
             error!("HTTP/3 tunnel handshake timeout");
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::GATEWAY_TIMEOUT,
-                Bytes::from_static(b"Tunnel handshake timeout"),
-            )
-            .await;
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Bytes::from_static(b"Tunnel handshake timeout"),
+                )
+                .await;
+            }
+            return Ok(());
         }
     };
     tokio::spawn(async move {
@@ -433,32 +608,130 @@ where
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
             error!("HTTP/3 request failed: {e}");
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::BAD_GATEWAY,
-                Bytes::from_static(b"Failed to send request"),
-            )
-            .await;
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::BAD_GATEWAY,
+                    Bytes::from_static(b"Failed to send request"),
+                )
+                .await;
+            }
+            return Ok(());
         }
         Err(_) => {
             error!("HTTP/3 upstream response timeout");
-            return send_simple_response(
-                &mut h3_stream,
-                StatusCode::GATEWAY_TIMEOUT,
-                Bytes::from_static(b"Upstream response timeout"),
-            )
-            .await;
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Bytes::from_static(b"Upstream response timeout"),
+                )
+                .await;
+            }
+            return Ok(());
         }
     };
-    send_upstream_response(response, h3_stream, registry, ctx, config).await
+
+    let mut h3_stream = stream_rx
+        .await
+        .map_err(|_| "body reader task dropped unexpectedly".to_string())?;
+    send_upstream_response(response, &mut h3_stream, registry, ctx, config).await
 }
 
-fn host_header_value(req: &Request<()>) -> Option<HeaderValue> {
-    req.headers().get(HOST).cloned().or_else(|| {
-        req.uri()
-            .authority()
-            .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok())
-    })
+/// Forward request to upstream via HTTP/2 (gRPC) and relay response back over H3.
+async fn forward_via_h2<S>(
+    forward_req: Request<BoxBody>,
+    stream_rx: tokio::sync::oneshot::Receiver<h3::server::RequestStream<S, Bytes>>,
+    tunnel_stream: ferrotunnel_core::transport::BoxedStream,
+    registry: Arc<PluginRegistry>,
+    ctx: RequestContext,
+    config: &Http3IngressConfig,
+) -> std::result::Result<(), String>
+where
+    S: BidiStream<Bytes> + Send + 'static,
+    S::RecvStream: RecvStream + Send,
+    S::SendStream: SendStream<Bytes> + Send,
+{
+    let io = TokioIo::new(tunnel_stream);
+
+    let handshake_result = tokio::time::timeout(
+        config.handshake_timeout,
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), io),
+    )
+    .await;
+    let (mut sender, conn) = match handshake_result {
+        Ok(Ok(handshake)) => handshake,
+        Ok(Err(e)) => {
+            error!("HTTP/3 gRPC tunnel handshake failed: {e}");
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::BAD_GATEWAY,
+                    Bytes::from_static(b"gRPC tunnel handshake failed"),
+                )
+                .await;
+            }
+            return Ok(());
+        }
+        Err(_) => {
+            error!("HTTP/3 gRPC tunnel handshake timeout");
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Bytes::from_static(b"gRPC tunnel handshake timeout"),
+                )
+                .await;
+            }
+            return Ok(());
+        }
+    };
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let response_result =
+        tokio::time::timeout(config.response_timeout, sender.send_request(forward_req)).await;
+    let response = match response_result {
+        Ok(Ok(response)) => response,
+        Ok(Err(e)) => {
+            error!("HTTP/3 gRPC request failed: {e}");
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::BAD_GATEWAY,
+                    Bytes::from_static(b"gRPC request failed"),
+                )
+                .await;
+            }
+            return Ok(());
+        }
+        Err(_) => {
+            error!("HTTP/3 gRPC upstream response timeout");
+            if let Ok(mut s) = stream_rx.await {
+                let _ = send_simple_response(
+                    &mut s,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Bytes::from_static(b"gRPC upstream response timeout"),
+                )
+                .await;
+            }
+            return Ok(());
+        }
+    };
+
+    let mut h3_stream = stream_rx
+        .await
+        .map_err(|_| "body reader task dropped unexpectedly".to_string())?;
+    send_upstream_response(response, &mut h3_stream, registry, ctx, config).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn host_header_value(req: &Request<()>) -> Option<&HeaderValue> {
+    req.headers().get(HOST)
 }
 
 fn is_grpc(headers: &hyper::HeaderMap) -> bool {
@@ -468,32 +741,10 @@ fn is_grpc(headers: &hyper::HeaderMap) -> bool {
         .is_some_and(|v| v.starts_with("application/grpc"))
 }
 
-async fn collect_h3_request_body<S>(
-    h3_stream: &mut h3::server::RequestStream<S, Bytes>,
-    max_size: usize,
-) -> std::result::Result<Bytes, String>
-where
-    S: RecvStream,
-{
-    let mut collected = Vec::new();
-    while let Some(mut chunk) = h3_stream
-        .recv_data()
-        .await
-        .map_err(|e| format!("Failed to read HTTP/3 request body: {e}"))?
-    {
-        let len = chunk.remaining();
-        if collected.len() + len > max_size {
-            return Err("HTTP/3 request body too large".into());
-        }
-        let bytes = chunk.copy_to_bytes(len);
-        collected.extend_from_slice(&bytes);
-    }
-    Ok(Bytes::from(collected))
-}
-
+/// Build the forward request with a streaming body (Section 1).
 fn build_forward_request(
     req: Request<()>,
-    body: Bytes,
+    body: Http3RequestBody,
     host: &HeaderValue,
     is_grpc: bool,
 ) -> std::result::Result<Request<BoxBody>, String> {
@@ -511,7 +762,9 @@ fn build_forward_request(
             let host = host
                 .to_str()
                 .map_err(|_| "Invalid Host header for gRPC request".to_string())?;
-            parts.uri = format!("http://{host}{path_and_query}")
+            // Section 4: scheme reflects client-facing protocol (QUIC+TLS = https).
+            // The actual tunnel transport is plaintext over the multiplexed stream.
+            parts.uri = format!("https://{host}{path_and_query}")
                 .parse::<Uri>()
                 .map_err(|e| format!("Invalid gRPC URI: {e}"))?;
         }
@@ -523,7 +776,31 @@ fn build_forward_request(
             .map_err(|e| format!("Invalid HTTP/1.1 URI: {e}"))?;
     }
 
-    Ok(Request::from_parts(parts, full_body(body)))
+    Ok(Request::from_parts(parts, streaming_body_to_boxbody(body)))
+}
+
+/// Convert our streaming Http3RequestBody into the project's BoxBody type.
+fn streaming_body_to_boxbody(body: Http3RequestBody) -> BoxBody {
+    use futures::stream::poll_fn;
+    use http_body_util::StreamBody;
+    use hyper::body::Body as _;
+
+    let mut body = body;
+    let frame_stream = poll_fn(
+        move |cx| -> Poll<Option<std::result::Result<Frame<Bytes>, hyper::Error>>> {
+            match Pin::new(&mut body).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+                Poll::Ready(Some(Err(e))) => {
+                    error!("HTTP/3 request body error: {e}");
+                    Poll::Ready(None)
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            }
+        },
+    );
+
+    StreamBody::new(frame_stream).boxed()
 }
 
 fn remove_connection_specific_headers(headers: &mut hyper::HeaderMap) {
@@ -532,28 +809,32 @@ fn remove_connection_specific_headers(headers: &mut hyper::HeaderMap) {
     headers.remove(UPGRADE);
 }
 
+// ---------------------------------------------------------------------------
+// Response relay
+// ---------------------------------------------------------------------------
+
 async fn send_upstream_response<S>(
-    response: Response<Incoming>,
-    mut h3_stream: h3::server::RequestStream<S, Bytes>,
+    response: Response<hyper::body::Incoming>,
+    h3_stream: &mut h3::server::RequestStream<S, Bytes>,
     registry: Arc<PluginRegistry>,
     ctx: RequestContext,
-    config: Http3IngressConfig,
+    config: &Http3IngressConfig,
 ) -> std::result::Result<(), String>
 where
-    S: BidiStream<Bytes> + Send + 'static,
-    S::RecvStream: RecvStream + Send,
-    S::SendStream: SendStream<Bytes> + Send,
+    S: SendStream<Bytes>,
 {
     if registry.needs_response_buffering().await {
-        send_buffered_response(response, &mut h3_stream, registry, ctx, config).await
+        send_buffered_response(response, h3_stream, registry, ctx, config).await
     } else {
-        send_streaming_response(response, &mut h3_stream).await
+        send_streaming_response(response, h3_stream, config.response_timeout).await
     }
 }
 
+/// Section 5: per-frame timeout on response body streaming.
 async fn send_streaming_response<S>(
-    response: Response<Incoming>,
+    response: Response<hyper::body::Incoming>,
     h3_stream: &mut h3::server::RequestStream<S, Bytes>,
+    frame_timeout: Duration,
 ) -> std::result::Result<(), String>
 where
     S: SendStream<Bytes>,
@@ -565,8 +846,19 @@ where
         .await
         .map_err(|e| format!("Failed to send HTTP/3 response headers: {e}"))?;
 
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| format!("Failed to read upstream response body: {e}"))?;
+    loop {
+        let frame = match tokio::time::timeout(frame_timeout, body.frame()).await {
+            Ok(Some(frame)) => {
+                frame.map_err(|e| format!("Failed to read upstream response body: {e}"))?
+            }
+            Ok(None) => break,
+            Err(_) => {
+                error!("HTTP/3 upstream body inactivity timeout");
+                let _ = h3_stream.finish().await;
+                return Err("upstream body inactivity timeout".into());
+            }
+        };
+
         if let Some(data) = frame.data_ref() {
             h3_stream
                 .send_data(data.clone())
@@ -587,19 +879,24 @@ where
         .map_err(|e| format!("Failed to finish HTTP/3 response: {e}"))
 }
 
+/// Section 9: avoid redundant Bytes → Vec → Bytes round-trip.
 async fn send_buffered_response<S>(
-    response: Response<Incoming>,
+    response: Response<hyper::body::Incoming>,
     h3_stream: &mut h3::server::RequestStream<S, Bytes>,
     registry: Arc<PluginRegistry>,
     ctx: RequestContext,
-    config: Http3IngressConfig,
+    config: &Http3IngressConfig,
 ) -> std::result::Result<(), String>
 where
     S: SendStream<Bytes>,
 {
     let (parts, body) = response.into_parts();
-    let body = collect_upstream_body(body, config.max_response_size).await?;
+    // Section 5: per-frame timeout also applies to buffered collection
+    let body =
+        collect_upstream_body(body, config.max_response_size, config.response_timeout).await?;
     let status = parts.status;
+
+    // Plugin API requires Vec<u8> — convert once at the boundary
     let mut plugin_response = Response::from_parts(parts, body.to_vec());
 
     let response_ctx = ResponseContext {
@@ -617,15 +914,16 @@ where
         error!("HTTP/3 plugin response hook error: {e}");
     }
 
-    let (parts, body) = plugin_response.into_parts();
+    let (parts, plugin_body) = plugin_response.into_parts();
     let response = Response::from_parts(sanitize_response_parts(parts), ());
     h3_stream
         .send_response(response)
         .await
         .map_err(|e| format!("Failed to send HTTP/3 response headers: {e}"))?;
-    if !body.is_empty() {
+    if !plugin_body.is_empty() {
+        // Convert once from Vec<u8> back to Bytes after plugin processing
         h3_stream
-            .send_data(Bytes::from(body))
+            .send_data(Bytes::from(plugin_body))
             .await
             .map_err(|e| format!("Failed to send HTTP/3 response data: {e}"))?;
     }
@@ -635,13 +933,23 @@ where
         .map_err(|e| format!("Failed to finish HTTP/3 response: {e}"))
 }
 
+/// Section 5: collect with per-frame timeout.
 async fn collect_upstream_body(
-    mut body: Incoming,
+    mut body: hyper::body::Incoming,
     max_size: usize,
+    frame_timeout: Duration,
 ) -> std::result::Result<Bytes, String> {
     let mut collected = Vec::new();
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| format!("Failed to read upstream response body: {e}"))?;
+    loop {
+        let frame = match tokio::time::timeout(frame_timeout, body.frame()).await {
+            Ok(Some(frame)) => {
+                frame.map_err(|e| format!("Failed to read upstream response body: {e}"))?
+            }
+            Ok(None) => break,
+            Err(_) => {
+                return Err("upstream body collection inactivity timeout".into());
+            }
+        };
         if let Some(data) = frame.data_ref() {
             if collected.len() + data.len() > max_size {
                 return Err("HTTP/3 upstream response body too large".into());
@@ -687,6 +995,7 @@ where
         .map_err(|e| format!("Failed to finish HTTP/3 response: {e}"))
 }
 
+/// Section 12.2: warn on invalid plugin status codes.
 async fn send_plugin_response<S>(
     h3_stream: &mut h3::server::RequestStream<S, Bytes>,
     status: u16,
@@ -696,8 +1005,14 @@ async fn send_plugin_response<S>(
 where
     S: SendStream<Bytes>,
 {
-    let mut response =
-        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    let status_code = match StatusCode::from_u16(status) {
+        Ok(s) => s,
+        Err(_) => {
+            warn!(status, "invalid plugin respond status, falling back to 200");
+            StatusCode::OK
+        }
+    };
+    let mut response = Response::builder().status(status_code);
     for (name, value) in headers {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
@@ -723,17 +1038,4 @@ where
         .finish()
         .await
         .map_err(|e| format!("Failed to finish plugin HTTP/3 response: {e}"))
-}
-
-fn full_body(bytes: Bytes) -> BoxBody {
-    http_body_util::Full::new(bytes)
-        .map_err(|never| match never {})
-        .boxed()
-}
-
-#[allow(dead_code)]
-fn empty_body() -> BoxBody {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
 }

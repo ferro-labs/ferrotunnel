@@ -154,14 +154,16 @@ impl Server {
                 .http3_key_path
                 .clone()
                 .ok_or_else(|| TunnelError::Config("HTTP/3 ingress requires key path".into()))?;
-            let http3_config = Http3IngressConfig {
-                cert_path: cert_path.to_string_lossy().to_string(),
-                key_path: key_path.to_string_lossy().to_string(),
-                ..Default::default()
-            };
+            let http3_config = Http3IngressConfig::with_certs(
+                cert_path.to_string_lossy().to_string(),
+                key_path.to_string_lossy().to_string(),
+            );
             let http3_ingress =
                 Http3Ingress::new(http3_bind_addr, sessions, registry, http3_config);
-            Some(tokio::spawn(async move { http3_ingress.start().await }))
+            let http3_shutdown_rx = shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                http3_ingress.start_with_shutdown(http3_shutdown_rx).await
+            }))
         } else {
             None
         };

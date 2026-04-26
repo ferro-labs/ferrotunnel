@@ -31,9 +31,10 @@ ferrotunnel-observability = { version = "1.0.7", path = "../ferrotunnel-observab
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 
 [features]
-http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn"]
+http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn", "dep:rustls"]
 quic = ["ferrotunnel-core/quic"]
 metrics = ["dep:ferrotunnel-observability"]
 

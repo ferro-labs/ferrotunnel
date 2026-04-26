@@ -169,16 +169,16 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         let key_path = args.http3_key.clone().or(args.tls_key.clone());
 
         if let (Some(cert), Some(key)) = (cert_path, key_path) {
-            let http3_config = ferrotunnel_http::Http3IngressConfig {
-                cert_path: cert.to_string_lossy().to_string(),
-                key_path: key.to_string_lossy().to_string(),
-                ca_cert_path: args
-                    .tls_ca
+            let http3_config = ferrotunnel_http::Http3IngressConfig::with_certs(
+                cert.to_string_lossy().to_string(),
+                key.to_string_lossy().to_string(),
+            )
+            .ca_cert_path(
+                args.tls_ca
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
-                client_auth: args.tls_client_auth,
-                ..Default::default()
-            };
+            )
+            .client_auth(args.tls_client_auth);
             let alt_svc = http3_config.alt_svc_header_value(http3_addr).ok();
             Some((http3_addr, http3_config, alt_svc))
         } else {

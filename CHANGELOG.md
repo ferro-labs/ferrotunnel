@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Deployment and README docs**: Added HTTP/3 usage, feature, CLI, firewall/UDP, TLS certificate, and architecture notes across the root, crate, CLI, HTTP, and deployment documentation
 - **Integration tests**: Added end-to-end HTTP/3 tunnel coverage plus strict unknown-host routing coverage in `ferrotunnel-tests`
 
+### Security
+- **aws-lc-sys** 0.37.0 → 0.40.0 — fixes RUSTSEC-2026-0044/0045/0046/0047/0048 (PKCS7 validation bypass, CRL scope logic error, AES-CCM timing side-channel, X.509 name constraints bypass)
+- **rustls-webpki** 0.103.9 → 0.103.13 — fixes RUSTSEC-2026-0098/0099/0104 (URI name constraint bypass, IP name constraint bypass, CRL parsing panic)
+- **time** 0.3.46 → 0.3.47 — fixes RUSTSEC-2026-0009 (stack exhaustion DoS)
+- **quinn-proto** 0.11.13 → 0.11.14
+
 #### Dependencies
 - **h3** 0.0.8 and **h3-quinn** 0.0.10 (optional, `http3` feature): HTTP/3 protocol support on top of the existing Quinn/rustls stack
 
