@@ -114,7 +114,14 @@ async fn test_http3_request_through_tunnel_and_alt_svc_advertised() {
             .headers()
             .get("alt-svc")
             .and_then(|v| v.to_str().ok()),
-        Some(format!("h3=\":{}\"; ma=86400", context.http3_addr.port()).as_str())
+        Some(
+            format!(
+                "h3=\":{}\"; ma=86400, h3-29=\":{}\"; ma=86400",
+                context.http3_addr.port(),
+                context.http3_addr.port()
+            )
+            .as_str(),
+        )
     );
 
     let (status, body) = send_h3_get(context.http3_addr, &context.cert_pem, tunnel_id).await;

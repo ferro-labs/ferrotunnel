@@ -460,9 +460,7 @@ where
             .await;
     }
 
-    let host = host_header_value(&req)
-        .ok_or("Missing or invalid Host header")?
-        .clone();
+    let host = host_header_value(&req).ok_or("Missing or invalid Host header")?;
     let tunnel_id = parse_and_normalize_host(Some(&host)).map_err(str::to_string)?;
 
     let ctx = RequestContext {
@@ -730,8 +728,12 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn host_header_value(req: &Request<()>) -> Option<&HeaderValue> {
-    req.headers().get(HOST)
+fn host_header_value(req: &Request<()>) -> Option<HeaderValue> {
+    req.headers().get(HOST).cloned().or_else(|| {
+        req.uri()
+            .authority()
+            .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok())
+    })
 }
 
 fn is_grpc(headers: &hyper::HeaderMap) -> bool {
