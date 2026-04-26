@@ -1,5 +1,5 @@
 # Build stage with cargo-chef for dependency caching
-FROM rust:1.90-slim-bookworm AS chef
+FROM rust:1.91-slim-bookworm AS chef
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \

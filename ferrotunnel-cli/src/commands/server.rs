@@ -52,6 +52,21 @@ pub struct ServerArgs {
     #[arg(long, env = "FERROTUNNEL_TCP_BIND")]
     tcp_bind: Option<SocketAddr>,
 
+    /// HTTP/3 Ingress bind address (UDP)
+    #[cfg(feature = "http3")]
+    #[arg(long, env = "FERROTUNNEL_HTTP3_BIND")]
+    http3_bind: Option<SocketAddr>,
+
+    /// Path to TLS certificate for HTTP/3 (reuses --tls-cert if not specified)
+    #[cfg(feature = "http3")]
+    #[arg(long, env = "FERROTUNNEL_HTTP3_CERT")]
+    http3_cert: Option<PathBuf>,
+
+    /// Path to TLS key for HTTP/3 (reuses --tls-key if not specified)
+    #[cfg(feature = "http3")]
+    #[arg(long, env = "FERROTUNNEL_HTTP3_KEY")]
+    http3_key: Option<PathBuf>,
+
     /// Enable tracing (metrics is separate via --metrics)
     #[arg(long, env = "FERROTUNNEL_OBSERVABILITY")]
     observability: bool,
@@ -148,9 +163,39 @@ pub async fn run(args: ServerArgs) -> Result<()> {
 
     let registry = std::sync::Arc::new(registry);
 
+    #[cfg(feature = "http3")]
+    let http3_start = if let Some(http3_addr) = args.http3_bind {
+        let cert_path = args.http3_cert.clone().or(args.tls_cert.clone());
+        let key_path = args.http3_key.clone().or(args.tls_key.clone());
+
+        if let (Some(cert), Some(key)) = (cert_path, key_path) {
+            let http3_config = ferrotunnel_http::Http3IngressConfig::with_certs(
+                cert.to_string_lossy().to_string(),
+                key.to_string_lossy().to_string(),
+            )
+            .ca_cert_path(
+                args.tls_ca
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+            )
+            .client_auth(args.tls_client_auth);
+            let alt_svc = http3_config.alt_svc_header_value(http3_addr).ok();
+            Some((http3_addr, http3_config, alt_svc))
+        } else {
+            error!("HTTP/3 requires TLS certificates. Provide --http3-cert/--http3-key or --tls-cert/--tls-key");
+            None
+        }
+    } else {
+        None
+    };
+
     info!("Starting HTTP Ingress on {}", args.http_bind);
-    let http_ingress =
+    let mut http_ingress =
         ferrotunnel_http::HttpIngress::new(args.http_bind, sessions.clone(), registry.clone());
+    #[cfg(feature = "http3")]
+    if let Some((_, _, Some(alt_svc))) = &http3_start {
+        http_ingress = http_ingress.with_alt_svc_header(alt_svc.clone());
+    }
     let http_handle = tokio::spawn(async move { http_ingress.start().await });
 
     // Start TCP Ingress (if enabled)
@@ -158,6 +203,20 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         info!("Starting TCP Ingress on {}", tcp_addr);
         let tcp_ingress = ferrotunnel_http::TcpIngress::new(tcp_addr, sessions.clone());
         Some(tokio::spawn(async move { tcp_ingress.start().await }))
+    } else {
+        None
+    };
+
+    #[cfg(feature = "http3")]
+    let http3_handle = if let Some((http3_addr, http3_config, _)) = http3_start {
+        info!("Starting HTTP/3 Ingress on {} (UDP)", http3_addr);
+        let http3_ingress = ferrotunnel_http::Http3Ingress::new(
+            http3_addr,
+            sessions.clone(),
+            registry.clone(),
+            http3_config,
+        );
+        Some(tokio::spawn(async move { http3_ingress.start().await }))
     } else {
         None
     };
@@ -218,6 +277,13 @@ pub async fn run(args: ServerArgs) -> Result<()> {
                 async {
                     #[cfg(feature = "quic")]
                     if let Some(h) = quic_handle {
+                        return h.await.map_err(std::io::Error::other)?;
+                    }
+                    Ok(())
+                },
+                async {
+                    #[cfg(feature = "http3")]
+                    if let Some(h) = http3_handle {
                         return h.await.map_err(std::io::Error::other)?;
                     }
                     Ok(())

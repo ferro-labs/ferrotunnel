@@ -191,6 +191,58 @@ async fn main() -> ferrotunnel::Result<()> {
 - `--quic-0rtt` is reserved for future 0-RTT support; current clients fall back to a full handshake
 - UDP-based — works better on lossy networks
 
+### HTTP/3 Ingress
+
+FerroTunnel v1.0.8+ can accept browser-facing HTTP/3 traffic on a UDP ingress
+port while preserving the existing HTTP/1.1, HTTP/2, WebSocket, and gRPC paths.
+HTTP/3 ingress is separate from QUIC tunnel transport: it uses `h3` +
+`h3-quinn` for public client requests, then forwards through the same strict
+`Host`-based tunnel routing as the TCP HTTP ingress.
+
+**CLI** — enable with the `http3` feature flag:
+
+```bash
+# Build with HTTP/3 ingress support
+cargo build -p ferrotunnel-cli --features http3
+
+# Server: HTTP/1.1+HTTP/2 on TCP :8080, HTTP/3 on UDP :8443
+ferrotunnel server --token secret \
+  --http-bind 0.0.0.0:8080 \
+  --http3-bind 0.0.0.0:8443 \
+  --tls-cert server.crt \
+  --tls-key server.key
+```
+
+When HTTP/3 is enabled, the TCP HTTP ingress advertises it with `Alt-Svc`, for
+example `Alt-Svc: h3=":8443"; ma=86400`.
+
+**Library**:
+
+```rust
+use ferrotunnel::Server;
+
+#[tokio::main]
+async fn main() -> ferrotunnel::Result<()> {
+    let mut server = Server::builder()
+        .bind("0.0.0.0:7835".parse().unwrap())
+        .http_bind("0.0.0.0:8080".parse().unwrap())
+        .http3(
+            "0.0.0.0:8443".parse().unwrap(),
+            "server.crt",
+            "server.key",
+        )
+        .token("my-secret-token")
+        .build()?;
+
+    server.start().await
+}
+```
+
+**Deployment notes**:
+- Requires TLS certificate and private key because HTTP/3 runs over QUIC/TLS 1.3
+- Requires UDP reachability to the HTTP/3 bind port
+- Keeps strict `Host` header routing; unknown hosts return `404 Tunnel not found`
+
 ## Features
 
 | Feature | Description |
@@ -206,6 +258,7 @@ async fn main() -> ferrotunnel::Result<()> {
 | **WebSocket** | Transparent WebSocket upgrade tunneling |
 | **gRPC** | Native gRPC tunneling over HTTP/2 with trailer preservation |
 | **QUIC** | Optional QUIC transport with native stream multiplexing |
+| **HTTP/3** | Optional browser-facing HTTP/3 ingress with Alt-Svc advertising |
 | **TCP & HTTP** | Forward both HTTP and raw TCP traffic |
 
 
@@ -263,6 +316,7 @@ ferrotunnel server [OPTIONS]
 | `--tls-cert` | `FERROTUNNEL_TLS_CERT` | - | TLS certificate |
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | TLS private key |
 | `--quic-bind`* | `FERROTUNNEL_QUIC_BIND` | - | QUIC endpoint (UDP) |
+| `--http3-bind`** | `FERROTUNNEL_HTTP3_BIND` | - | HTTP/3 ingress endpoint (UDP) |
 
 ### Client
 
@@ -283,6 +337,7 @@ ferrotunnel client [OPTIONS]
 | `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | false | Enable 0-RTT reconnection |
 
 *\* Requires `--features quic` at build time.*
+*\*\* Requires `--features http3` at build time.*
 
 See [ferrotunnel-cli/README.md](ferrotunnel-cli/README.md) for all options.
 

@@ -33,10 +33,45 @@ async fn main() -> ferrotunnel::Result<()> {
 
 - TLS 1.3 encryption with rustls
 - QUIC transport with native stream multiplexing (feature: `quic`)
+- HTTP/3 ingress with Alt-Svc advertising (feature: `http3`)
 - Token-based authentication
 - HTTP, WebSocket, gRPC, and TCP tunneling
 - Automatic reconnection with backoff
 - Prometheus metrics and tracing
+
+## HTTP/3 Ingress
+
+Build with the `http3` feature to accept browser-facing HTTP/3 traffic on a UDP
+ingress port:
+
+```toml
+[dependencies]
+ferrotunnel = { version = "1.0", features = ["http3"] }
+```
+
+```rust
+use ferrotunnel::Server;
+
+#[tokio::main]
+async fn main() -> ferrotunnel::Result<()> {
+    let mut server = Server::builder()
+        .bind("0.0.0.0:7835".parse().unwrap())
+        .http_bind("0.0.0.0:8080".parse().unwrap())
+        .http3(
+            "0.0.0.0:8443".parse().unwrap(),
+            "server.crt",
+            "server.key",
+        )
+        .token("my-token")
+        .build()?;
+
+    server.start().await
+}
+```
+
+The regular HTTP ingress advertises HTTP/3 with `Alt-Svc` when `.http3(...)` is
+configured. HTTP/3 routing uses the same strict `Host` matching as HTTP/1.1 and
+HTTP/2 ingress.
 
 ## Documentation
 

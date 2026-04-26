@@ -18,9 +18,9 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.7"
+version = "1.0.8"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.91"
 authors = ["Mitul Shah <shahmitul005@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ferro-labs/ferrotunnel"
@@ -53,10 +53,12 @@ tokio = { version = "1", features = ["full"] }
 
 # Logging
 tracing = "0.1"
-ferrotunnel-observability = { version = "1.0.7", path = "ferrotunnel-observability" }
+ferrotunnel-observability = { version = "1.0.8", path = "ferrotunnel-observability" }
 
 # QUIC transport
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+h3 = { version = "0.0.8" }
+h3-quinn = { version = "0.0.10" }
 
 # High-performance allocator
 mimalloc = { version = "0.1", default-features = false }

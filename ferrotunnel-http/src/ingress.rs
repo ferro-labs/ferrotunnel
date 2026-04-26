@@ -4,6 +4,7 @@ use ferrotunnel_plugin::{PluginAction, PluginRegistry, RequestContext, ResponseC
 use ferrotunnel_protocol::frame::Protocol;
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Bytes;
+use hyper::header::HeaderValue;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -26,6 +27,8 @@ pub struct IngressConfig {
     pub handshake_timeout: Duration,
     /// Timeout for upstream response (default: 60s)
     pub response_timeout: Duration,
+    /// Optional Alt-Svc header value to advertise HTTP/3 ingress.
+    pub alt_svc_header: Option<HeaderValue>,
 }
 
 impl Default for IngressConfig {
@@ -35,6 +38,7 @@ impl Default for IngressConfig {
             max_response_size: 100 * 1024 * 1024, // 100MB
             handshake_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(60),
+            alt_svc_header: None,
         }
     }
 }
@@ -72,6 +76,12 @@ impl HttpIngress {
             config,
             connection_semaphore,
         }
+    }
+
+    #[must_use]
+    pub fn with_alt_svc_header(mut self, value: HeaderValue) -> Self {
+        self.config.alt_svc_header = Some(value);
+        self
     }
 
     pub async fn start(self) -> Result<()> {
@@ -331,7 +341,10 @@ async fn handle_request(
 
         let (parts, body) = res.into_parts();
         // Stream the response body directly to preserve HTTP/2 trailers
-        return Ok(Response::from_parts(parts, body.boxed()));
+        return Ok(with_alt_svc_header(
+            Response::from_parts(parts, body.boxed()),
+            &config,
+        ));
     }
 
     let handshake_result = tokio::time::timeout(
@@ -441,7 +454,10 @@ async fn handle_request(
 
     if !registry.needs_response_buffering().await {
         let streaming_body = body.boxed();
-        return Ok(Response::from_parts(parts, streaming_body));
+        return Ok(with_alt_svc_header(
+            Response::from_parts(parts, streaming_body),
+            &config,
+        ));
     }
 
     // Buffer response for plugin processing
@@ -477,7 +493,10 @@ async fn handle_request(
         .map_err(|never| match never {})
         .boxed();
 
-    Ok(Response::from_parts(final_parts, boxed_body))
+    Ok(with_alt_svc_header(
+        Response::from_parts(final_parts, boxed_body),
+        &config,
+    ))
 }
 
 fn is_grpc(headers: &hyper::HeaderMap) -> bool {
@@ -504,8 +523,8 @@ fn is_websocket_upgrade(headers: &hyper::HeaderMap) -> bool {
 
 /// Parse and normalize the Host header for secure multi-tenant routing.
 /// Handles IPv6 addresses, port stripping, and case normalization.
-fn parse_and_normalize_host(
-    host_header: Option<&hyper::header::HeaderValue>,
+pub(crate) fn parse_and_normalize_host(
+    host_header: Option<&HeaderValue>,
 ) -> std::result::Result<String, &'static str> {
     let host_str = host_header
         .and_then(|h| h.to_str().ok())
@@ -618,6 +637,19 @@ fn full_body(bytes: Bytes) -> BoxBody {
         .boxed()
 }
 
+fn with_alt_svc_header(
+    mut response: Response<BoxBody>,
+    config: &IngressConfig,
+) -> Response<BoxBody> {
+    if let Some(value) = &config.alt_svc_header {
+        response.headers_mut().insert(
+            hyper::header::HeaderName::from_static("alt-svc"),
+            value.clone(),
+        );
+    }
+    response
+}
+
 fn _empty_response(status: StatusCode) -> Response<BoxBody> {
     Response::builder()
         .status(status)
@@ -640,43 +672,43 @@ mod tests {
 
     #[test]
     fn test_parse_host_simple() {
-        let hv = hyper::header::HeaderValue::from_static("example.com");
+        let hv = HeaderValue::from_static("example.com");
         assert_eq!(parse_and_normalize_host(Some(&hv)).unwrap(), "example.com");
     }
 
     #[test]
     fn test_parse_host_with_port() {
-        let hv = hyper::header::HeaderValue::from_static("example.com:8080");
+        let hv = HeaderValue::from_static("example.com:8080");
         assert_eq!(parse_and_normalize_host(Some(&hv)).unwrap(), "example.com");
     }
 
     #[test]
     fn test_parse_host_uppercase() {
-        let hv = hyper::header::HeaderValue::from_static("EXAMPLE.COM");
+        let hv = HeaderValue::from_static("EXAMPLE.COM");
         assert_eq!(parse_and_normalize_host(Some(&hv)).unwrap(), "example.com");
     }
 
     #[test]
     fn test_parse_host_trailing_dot() {
-        let hv = hyper::header::HeaderValue::from_static("example.com.");
+        let hv = HeaderValue::from_static("example.com.");
         assert_eq!(parse_and_normalize_host(Some(&hv)).unwrap(), "example.com");
     }
 
     #[test]
     fn test_parse_host_ipv6() {
-        let hv = hyper::header::HeaderValue::from_static("[::1]:8080");
+        let hv = HeaderValue::from_static("[::1]:8080");
         assert_eq!(parse_and_normalize_host(Some(&hv)).unwrap(), "::1");
     }
 
     #[test]
     fn test_parse_host_ipv4() {
-        let hv = hyper::header::HeaderValue::from_static("192.168.1.1:3000");
+        let hv = HeaderValue::from_static("192.168.1.1:3000");
         assert_eq!(parse_and_normalize_host(Some(&hv)).unwrap(), "192.168.1.1");
     }
 
     #[test]
     fn test_parse_host_empty() {
-        let hv = hyper::header::HeaderValue::from_static("");
+        let hv = HeaderValue::from_static("");
         assert!(parse_and_normalize_host(Some(&hv)).is_err());
     }
 
