@@ -138,7 +138,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz
       - name: Run Fuzzer (Smoke Check)
         run: cd ferrotunnel-protocol && cargo +nightly fuzz run codec_decode --sanitizer=none -- -max_total_time=30
 
