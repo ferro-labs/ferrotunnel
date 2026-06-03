@@ -28,7 +28,7 @@ Examples of unacceptable behavior include:
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project team at **shahmitul005@gmail.com** (or by opening a confidential issue).
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project team at **hello@ferrolabs.ai** (or by opening a confidential issue).
 
 All complaints will be reviewed and investigated promptly and fairly.
 

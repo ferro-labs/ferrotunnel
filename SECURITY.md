@@ -18,7 +18,7 @@ The FerroTunnel project team takes security issues seriously. We appreciate your
 
 Instead, please report security vulnerabilities by email to:
 
-**shahmitul005@gmail.com**
+**hello@ferrolabs.ai**
 
 Or, if you prefer, you can use GitHub's private vulnerability reporting feature:
 
@@ -51,7 +51,7 @@ Third-party stakeholders may include:
 
 ### Participation in Coordination
 
-Downstream project maintainers and FerroTunnel users can request participation in coordination of applicable security issues by sending your contact information to **shahmitul005@gmail.com**.
+Downstream project maintainers and FerroTunnel users can request participation in coordination of applicable security issues by sending your contact information to **hello@ferrolabs.ai**.
 
 Please include:
 - Contact email address
@@ -133,11 +133,11 @@ We support safe harbor for security researchers who:
 
 - Make a good faith effort to avoid privacy violations, destruction of data, and interruption or degradation of our service
 - Only interact with accounts you own or for which you have explicit permission
-- Contact us at **shahmitul005@gmail.com** if you encounter any user data during testing
+- Contact us at **hello@ferrolabs.ai** if you encounter any user data during testing
 - Do not exploit vulnerabilities beyond the minimum necessary to confirm their existence
 
 We will not pursue legal action against researchers who follow these guidelines.
 
 ## Questions?
 
-If you have any questions about this security policy, please contact **shahmitul005@gmail.com**.
+If you have any questions about this security policy, please contact **hello@ferrolabs.ai**.

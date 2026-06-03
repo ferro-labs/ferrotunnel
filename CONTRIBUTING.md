@@ -54,4 +54,4 @@ Example: `feat: implement circuit breaker plugin`
 
 ## Questions?
 
-Feel free to open an issue or reach out to the maintainers at [shahmitul005@gmail.com](mailto:shahmitul005@gmail.com).
+Feel free to open an issue or reach out to the maintainers at [hello@ferrolabs.ai](mailto:hello@ferrolabs.ai).
