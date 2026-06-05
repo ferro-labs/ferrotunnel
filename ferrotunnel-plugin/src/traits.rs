@@ -56,6 +56,12 @@ pub enum StreamDirection {
 }
 
 /// Core plugin trait
+///
+/// Hook implementations should return `Err` for recoverable failures and avoid
+/// panicking. `PluginRegistry` isolates `on_request` and `on_response` panics,
+/// logs the offending plugin name, and converts the panic into a normal plugin
+/// error so ingress handlers can return a clean 500 response instead of dropping
+/// the connection task.
 #[async_trait]
 pub trait Plugin: Send + Sync {
     /// Plugin name (for logging/debugging)

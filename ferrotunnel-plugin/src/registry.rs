@@ -1,6 +1,12 @@
 use crate::traits::{Plugin, PluginAction, RequestContext, ResponseContext};
+use std::error::Error;
+use std::io;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::task::JoinError;
+
+type PluginError = Box<dyn Error + Send + Sync + 'static>;
+type PluginResult<T> = Result<T, PluginError>;
 
 /// Registry manages all loaded plugins
 #[derive(Default)]
@@ -21,7 +27,7 @@ impl PluginRegistry {
     }
 
     /// Initialize all plugins
-    pub async fn init_all(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+    pub async fn init_all(&self) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         for plugin_lock in &self.plugins {
             let mut plugin = plugin_lock.write().await;
             tracing::info!("Initializing plugin: {}", plugin.name());
@@ -35,14 +41,28 @@ impl PluginRegistry {
         &self,
         req: &mut http::Request<()>,
         ctx: &RequestContext,
-    ) -> Result<PluginAction, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    ) -> Result<PluginAction, Box<dyn Error + Send + Sync + 'static>> {
+        let mut current_req = std::mem::replace(req, http::Request::new(()));
         for plugin_lock in &self.plugins {
-            let plugin = plugin_lock.read().await;
-            match plugin.on_request(req, ctx).await? {
+            let plugin_name = plugin_name(plugin_lock).await;
+            let plugin_lock = plugin_lock.clone();
+            let ctx = ctx.clone();
+            let hook = tokio::spawn(run_request_hook(plugin_lock, current_req, ctx));
+            let (next_req, action) = match hook.await {
+                Ok(result) => result,
+                Err(err) => return Err(join_error(&plugin_name, "on_request", &err)),
+            };
+            current_req = next_req;
+
+            match action? {
                 PluginAction::Continue => continue,
-                action => return Ok(action), // Short-circuit on non-Continue
+                action => {
+                    *req = current_req;
+                    return Ok(action); // Short-circuit on non-Continue
+                }
             }
         }
+        *req = current_req;
         Ok(PluginAction::Continue)
     }
 
@@ -51,21 +71,33 @@ impl PluginRegistry {
         &self,
         res: &mut http::Response<Vec<u8>>,
         ctx: &ResponseContext,
-    ) -> Result<PluginAction, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    ) -> Result<PluginAction, Box<dyn Error + Send + Sync + 'static>> {
+        let mut current_res = std::mem::replace(res, http::Response::new(Vec::new()));
         for plugin_lock in &self.plugins {
-            let plugin = plugin_lock.read().await;
-            match plugin.on_response(res, ctx).await? {
+            let plugin_name = plugin_name(plugin_lock).await;
+            let plugin_lock = plugin_lock.clone();
+            let ctx = ctx.clone();
+            let hook = tokio::spawn(run_response_hook(plugin_lock, current_res, ctx));
+            let (next_res, action) = match hook.await {
+                Ok(result) => result,
+                Err(err) => return Err(join_error(&plugin_name, "on_response", &err)),
+            };
+            current_res = next_res;
+
+            match action? {
                 PluginAction::Continue => continue,
-                action => return Ok(action),
+                action => {
+                    *res = current_res;
+                    return Ok(action);
+                }
             }
         }
+        *res = current_res;
         Ok(PluginAction::Continue)
     }
 
     /// Shutdown all plugins
-    pub async fn shutdown_all(
-        &self,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+    pub async fn shutdown_all(&self) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         for plugin_lock in &self.plugins {
             let mut plugin = plugin_lock.write().await;
             tracing::info!("Shutting down plugin: {}", plugin.name());
@@ -92,6 +124,45 @@ impl PluginRegistry {
     }
 }
 
+async fn plugin_name(plugin_lock: &Arc<RwLock<dyn Plugin>>) -> String {
+    let plugin = plugin_lock.read().await;
+    plugin.name().to_owned()
+}
+
+async fn run_request_hook(
+    plugin_lock: Arc<RwLock<dyn Plugin>>,
+    mut req: http::Request<()>,
+    ctx: RequestContext,
+) -> (http::Request<()>, PluginResult<PluginAction>) {
+    let plugin = plugin_lock.read().await;
+    let action = plugin.on_request(&mut req, &ctx).await;
+    (req, action)
+}
+
+async fn run_response_hook(
+    plugin_lock: Arc<RwLock<dyn Plugin>>,
+    mut res: http::Response<Vec<u8>>,
+    ctx: ResponseContext,
+) -> (http::Response<Vec<u8>>, PluginResult<PluginAction>) {
+    let plugin = plugin_lock.read().await;
+    let action = plugin.on_response(&mut res, &ctx).await;
+    (res, action)
+}
+
+fn join_error(plugin_name: &str, hook: &str, err: &JoinError) -> PluginError {
+    if err.is_panic() {
+        tracing::error!(plugin = plugin_name, hook, "plugin hook panicked");
+        Box::new(io::Error::other(format!(
+            "plugin `{plugin_name}` panicked during {hook} hook"
+        )))
+    } else {
+        tracing::error!(plugin = plugin_name, hook, error = %err, "plugin hook task failed");
+        Box::new(io::Error::other(format!(
+            "plugin `{plugin_name}` {hook} hook task failed: {err}"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +180,7 @@ mod tests {
             &self,
             _req: &mut http::Request<()>,
             _ctx: &RequestContext,
-        ) -> Result<PluginAction, Box<dyn std::error::Error + Send + Sync + 'static>> {
+        ) -> Result<PluginAction, Box<dyn Error + Send + Sync + 'static>> {
             Ok(PluginAction::Reject {
                 status: 403,
                 reason: "Blocked".into(),
@@ -139,12 +210,53 @@ mod tests {
         }
     }
 
+    struct PanicRequestPlugin;
+    #[async_trait]
+    impl Plugin for PanicRequestPlugin {
+        fn name(&self) -> &str {
+            "panic-request"
+        }
+
+        async fn on_request(
+            &self,
+            _req: &mut http::Request<()>,
+            _ctx: &RequestContext,
+        ) -> Result<PluginAction, Box<dyn Error + Send + Sync + 'static>> {
+            panic!("request hook panic")
+        }
+    }
+
+    struct PanicResponsePlugin;
+    #[async_trait]
+    impl Plugin for PanicResponsePlugin {
+        fn name(&self) -> &str {
+            "panic-response"
+        }
+
+        async fn on_response(
+            &self,
+            _res: &mut http::Response<Vec<u8>>,
+            _ctx: &ResponseContext,
+        ) -> Result<PluginAction, Box<dyn Error + Send + Sync + 'static>> {
+            panic!("response hook panic")
+        }
+    }
+
     fn make_request_ctx() -> RequestContext {
         RequestContext {
             tunnel_id: "test".into(),
             session_id: "sess".into(),
             remote_addr: "127.0.0.1:80".parse().unwrap(),
             timestamp: std::time::SystemTime::now(),
+        }
+    }
+
+    fn make_response_ctx() -> ResponseContext {
+        ResponseContext {
+            tunnel_id: "test".into(),
+            session_id: "sess".into(),
+            status_code: 200,
+            duration_ms: 1,
         }
     }
 
@@ -258,5 +370,53 @@ mod tests {
             PluginAction::Reject { status, .. } => assert_eq!(status, 403),
             _ => panic!("Expected reject - should short-circuit"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_request_hook_panic_is_reported_as_error() {
+        let mut registry = PluginRegistry::new();
+        registry.register(Arc::new(RwLock::new(PanicRequestPlugin)));
+
+        let join = tokio::spawn(async move {
+            let mut req = http::Request::new(());
+            let ctx = make_request_ctx();
+            registry.execute_request_hooks(&mut req, &ctx).await
+        });
+
+        let result = match join.await {
+            Ok(result) => result,
+            Err(err) => panic!("registry task should not panic: {err}"),
+        };
+        let err = match result {
+            Ok(action) => panic!("expected plugin error, got {action:?}"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("panic-request"));
+        assert!(msg.contains("on_request"));
+    }
+
+    #[tokio::test]
+    async fn test_response_hook_panic_is_reported_as_error() {
+        let mut registry = PluginRegistry::new();
+        registry.register(Arc::new(RwLock::new(PanicResponsePlugin)));
+
+        let join = tokio::spawn(async move {
+            let mut res = http::Response::new(Vec::new());
+            let ctx = make_response_ctx();
+            registry.execute_response_hooks(&mut res, &ctx).await
+        });
+
+        let result = match join.await {
+            Ok(result) => result,
+            Err(err) => panic!("registry task should not panic: {err}"),
+        };
+        let err = match result {
+            Ok(action) => panic!("expected plugin error, got {action:?}"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("panic-response"));
+        assert!(msg.contains("on_response"));
     }
 }
