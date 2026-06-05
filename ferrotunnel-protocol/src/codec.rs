@@ -10,11 +10,13 @@
 use crate::constants::MAX_FRAME_SIZE;
 use crate::frame::{Frame, ZeroCopyFrame};
 use bytes::{Buf, BufMut, BytesMut};
+use ferrotunnel_common::LimitsConfig;
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
 /// Frame header size: 4 bytes length + 1 byte type
 const HEADER_SIZE: usize = 5;
+const MIN_MAX_FRAME_SIZE: usize = 1;
 
 const FRAME_TYPE_CONTROL: u8 = 0x00;
 const FRAME_TYPE_DATA: u8 = 0x01;
@@ -42,9 +44,7 @@ pub struct TunnelCodec {
 
 impl Default for TunnelCodec {
     fn default() -> Self {
-        Self {
-            max_frame_size: MAX_FRAME_SIZE as usize,
-        }
+        Self::with_max_frame_size(MAX_FRAME_SIZE as usize)
     }
 }
 
@@ -58,7 +58,25 @@ impl TunnelCodec {
     /// Create a new codec instance with a custom max frame size
     #[inline]
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
+        assert!(
+            max_frame_size >= MIN_MAX_FRAME_SIZE,
+            "max frame size must be greater than zero"
+        );
+        assert!(
+            u32::try_from(max_frame_size).is_ok(),
+            "max frame size must fit in the wire length prefix"
+        );
         Self { max_frame_size }
+    }
+
+    /// Create a new codec instance from configured resource limits.
+    #[inline]
+    pub fn from_limits(limits: &LimitsConfig) -> Self {
+        let max_frame_size = match usize::try_from(limits.max_frame_bytes) {
+            Ok(max_frame_size) => max_frame_size,
+            Err(error) => panic!("max frame size must fit in usize: {error}"),
+        };
+        Self::with_max_frame_size(max_frame_size)
     }
 
     /// Get the configured max frame size
@@ -453,6 +471,32 @@ mod tests {
 
         // Should fail validation before trying to read more
         let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "max frame size must be greater than zero")]
+    fn test_zero_max_frame_size_rejected() {
+        let _codec = TunnelCodec::with_max_frame_size(0);
+    }
+
+    #[test]
+    fn test_from_limits_enforces_configured_frame_size() {
+        let limits = LimitsConfig {
+            max_frame_bytes: 8,
+            ..Default::default()
+        };
+        let mut codec = TunnelCodec::from_limits(&limits);
+        assert_eq!(codec.max_frame_size(), 8);
+        let mut buf = BytesMut::new();
+
+        let frame = Frame::Data {
+            stream_id: 1,
+            data: Bytes::from_static(b"abc"),
+            end_of_stream: false,
+        };
+
+        let result = codec.encode(frame, &mut buf);
         assert!(result.is_err());
     }
 

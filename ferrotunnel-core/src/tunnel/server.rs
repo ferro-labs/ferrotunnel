@@ -5,7 +5,7 @@ use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
 use crate::tunnel::common::clamp_u128_to_u64;
 use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
-use ferrotunnel_common::{Result, TunnelError};
+use ferrotunnel_common::{LimitsConfig, Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
 use ferrotunnel_protocol::frame::{Frame, HandshakeFrame, HandshakeStatus};
@@ -30,6 +30,7 @@ pub struct TunnelServer {
     session_timeout: Duration,
     resource_limits: ServerResourceLimits,
     transport_config: TransportConfig,
+    limits_config: LimitsConfig,
 }
 
 impl TunnelServer {
@@ -41,6 +42,7 @@ impl TunnelServer {
             session_timeout: Duration::from_secs(90),
             resource_limits: ServerResourceLimits::default(),
             transport_config: TransportConfig::default(),
+            limits_config: LimitsConfig::default(),
         }
     }
 
@@ -54,6 +56,12 @@ impl TunnelServer {
     #[must_use]
     pub fn with_resource_limits(mut self, limits: ServerResourceLimits) -> Self {
         self.resource_limits = limits;
+        self
+    }
+
+    #[must_use]
+    pub fn with_limits(mut self, limits: LimitsConfig) -> Self {
+        self.limits_config = limits;
         self
     }
 
@@ -149,11 +157,18 @@ impl TunnelServer {
 
                     let sessions = sessions.clone();
                     let token = self.auth_token.clone();
+                    let limits = self.limits_config.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            Self::handle_connection(stream, addr, sessions, token, session_permit)
-                                .await
+                        if let Err(e) = Self::handle_connection(
+                            stream,
+                            addr,
+                            sessions,
+                            token,
+                            session_permit,
+                            limits,
+                        )
+                        .await
                         {
                             warn!("Connection error for {}: {}", addr, e);
                         }
@@ -173,8 +188,9 @@ impl TunnelServer {
         sessions: SessionStoreBackend,
         expected_token: String,
         _session_permit: SessionPermit,
+        limits_config: LimitsConfig,
     ) -> Result<()> {
-        let mut framed = Framed::new(stream, TunnelCodec::new());
+        let mut framed = Framed::new(stream, TunnelCodec::from_limits(&limits_config));
 
         // 1. Handshake
         if let Some(result) = framed.next().await {
@@ -380,6 +396,7 @@ impl TunnelServer {
 
                     let sessions = sessions.clone();
                     let token = self.auth_token.clone();
+                    let limits = self.limits_config.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_quic_connection(
@@ -388,6 +405,7 @@ impl TunnelServer {
                             sessions,
                             token,
                             session_permit,
+                            limits,
                         )
                         .await
                         {
@@ -413,6 +431,7 @@ impl TunnelServer {
         sessions: SessionStoreBackend,
         expected_token: String,
         _session_permit: SessionPermit,
+        limits_config: LimitsConfig,
     ) -> Result<()> {
         // Accept the control stream (first bidi stream opened by client)
         let (ctrl_send, ctrl_recv) = connection
@@ -421,9 +440,11 @@ impl TunnelServer {
             .map_err(|e| TunnelError::Connection(format!("QUIC control stream accept: {e}")))?;
 
         let mut ctrl_framed_recv =
-            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
-        let mut ctrl_framed_send =
-            tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
+            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::from_limits(&limits_config));
+        let mut ctrl_framed_send = tokio_util::codec::FramedWrite::new(
+            ctrl_send,
+            TunnelCodec::from_limits(&limits_config),
+        );
 
         // 1. Handshake on control stream
         let frame = ctrl_framed_recv

@@ -19,7 +19,7 @@
 //! ```
 
 use crate::config::{ClientConfig, TunnelInfo};
-use ferrotunnel_common::config::TlsConfig;
+use ferrotunnel_common::config::{LimitsConfig, TlsConfig};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_core::transport::{tls::TlsTransportConfig, TransportConfig};
 use ferrotunnel_core::TunnelClient;
@@ -99,6 +99,7 @@ impl Client {
         let tunnel_id = config.tunnel_id.clone();
         let auto_reconnect = config.auto_reconnect;
         let reconnect_delay = config.reconnect_delay;
+        let limits = config.limits.clone();
         let transport_config = self.transport_config.clone();
 
         let info_tx = Arc::new(Mutex::new(Some(info_tx)));
@@ -116,7 +117,8 @@ impl Client {
 
             loop {
                 let mut client = TunnelClient::new(server_addr.clone(), token.clone())
-                    .with_transport(transport_config.clone());
+                    .with_transport(transport_config.clone())
+                    .with_limits(limits.clone());
                 if let Some(ref id) = tunnel_id {
                     client = client.with_tunnel_id(id.clone());
                 }
@@ -325,6 +327,13 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure resource limits.
+    #[must_use]
+    pub fn limits(mut self, limits: &LimitsConfig) -> Self {
+        self.config.limits = limits.clone();
+        self
+    }
+
     /// Configure TLS for the connection.
     ///
     /// When enabled, the client will use TLS to connect to the server.
@@ -392,6 +401,10 @@ mod tests {
             .local_addr("127.0.0.1:3000")
             .auto_reconnect(false)
             .reconnect_delay(Duration::from_secs(10))
+            .limits(&LimitsConfig {
+                max_frame_bytes: 4096,
+                ..Default::default()
+            })
             .build()
             .expect("should build successfully");
 
@@ -400,6 +413,7 @@ mod tests {
         assert_eq!(client.config().local_addr, "127.0.0.1:3000");
         assert!(!client.config().auto_reconnect);
         assert_eq!(client.config().reconnect_delay, Duration::from_secs(10));
+        assert_eq!(client.config().limits.max_frame_bytes, 4096);
     }
 
     #[test]
