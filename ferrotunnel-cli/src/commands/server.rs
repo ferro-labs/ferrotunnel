@@ -106,9 +106,33 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         // Start metrics endpoint in background (only when metrics is enabled)
         let metrics_addr = args.metrics_bind;
         tokio::spawn(async move {
-            use axum::{routing::get, Router};
+            use axum::{
+                http::StatusCode,
+                response::{IntoResponse, Response},
+                routing::get,
+                Router,
+            };
+            async fn metrics_response() -> Response {
+                match gather_metrics() {
+                    Ok(metrics) => (
+                        StatusCode::OK,
+                        [("content-type", "text/plain; charset=utf-8")],
+                        metrics,
+                    )
+                        .into_response(),
+                    Err(error) => {
+                        tracing::error!(%error, "failed to gather metrics");
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "failed to gather metrics\n",
+                        )
+                            .into_response()
+                    }
+                }
+            }
+
             let app = Router::new()
-                .route("/metrics", get(|| async { gather_metrics() }))
+                .route("/metrics", get(metrics_response))
                 .route("/health/ready", get(|| async { "OK" }));
             info!("Metrics server listening on http://{}", metrics_addr);
             match tokio::net::TcpListener::bind(metrics_addr).await {

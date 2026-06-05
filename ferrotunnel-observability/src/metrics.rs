@@ -5,8 +5,10 @@
 //! - **Units**: in the name (e.g. `_seconds`, `_bytes`)
 //! - **Gauges**: descriptive names, no `_total`
 
+use anyhow::Context;
 use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
 use std::sync::LazyLock;
+use std::sync::Once;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -17,6 +19,7 @@ pub static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 
 /// Global tunnel metrics. Set when [`init_metrics`] is called.
 static TUNNEL_METRICS: OnceLock<TunnelMetrics> = OnceLock::new();
+static METRICS_INIT: Once = Once::new();
 
 /// Tunnel-level metrics: frames, bytes, decode/encode latency, queue depth.
 ///
@@ -33,43 +36,43 @@ pub struct TunnelMetrics {
 impl TunnelMetrics {
     /// Create and register metrics with the default Prometheus registry.
     pub fn new() -> Self {
+        Self::try_new().expect("register FerroTunnel tunnel metrics")
+    }
+
+    /// Try to create and register metrics with the default Prometheus registry.
+    pub fn try_new() -> Result<Self, prometheus::Error> {
         let frames_processed = register_counter!(
             "ferrotunnel_tunnel_frames_processed_total",
             "Total number of protocol frames processed (decoded or encoded)"
-        )
-        .expect("register ferrotunnel_tunnel_frames_processed_total");
+        )?;
 
         let bytes_transferred = register_counter!(
             "ferrotunnel_tunnel_bytes_transferred_total",
             "Total bytes transferred through the tunnel (data frames only)"
-        )
-        .expect("register ferrotunnel_tunnel_bytes_transferred_total");
+        )?;
 
         let decode_latency = register_histogram!(
             "ferrotunnel_tunnel_decode_latency_seconds",
             "Latency of decoding frames from the wire"
-        )
-        .expect("register ferrotunnel_tunnel_decode_latency_seconds");
+        )?;
 
         let encode_latency = register_histogram!(
             "ferrotunnel_tunnel_encode_latency_seconds",
             "Latency of encoding frames to the wire"
-        )
-        .expect("register ferrotunnel_tunnel_encode_latency_seconds");
+        )?;
 
         let queue_depth = register_gauge!(
             "ferrotunnel_tunnel_queue_depth",
             "Current number of frames queued in the batched sender"
-        )
-        .expect("register ferrotunnel_tunnel_queue_depth");
+        )?;
 
-        Self {
+        Ok(Self {
             frames_processed,
             bytes_transferred,
             decode_latency,
             encode_latency,
             queue_depth,
-        }
+        })
     }
 
     /// Record a decode operation (frames decoded, bytes, and latency).
@@ -116,8 +119,19 @@ pub fn tunnel_metrics() -> Option<&'static TunnelMetrics> {
 /// Initialize the metrics system and register tunnel metrics.
 pub fn init_metrics() {
     let _ = LazyLock::force(&REGISTRY);
-    let _ = TUNNEL_METRICS.set(TunnelMetrics::new());
-    tracing::info!("Metrics infrastructure initialized");
+    if TUNNEL_METRICS.get().is_some() {
+        return;
+    }
+
+    METRICS_INIT.call_once(|| match TunnelMetrics::try_new() {
+        Ok(metrics) => {
+            let _ = TUNNEL_METRICS.set(metrics);
+            tracing::info!("Metrics infrastructure initialized");
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to initialize metrics infrastructure");
+        }
+    });
 }
 
 /// Returns true if metrics have been initialized.
@@ -127,11 +141,29 @@ pub fn metrics_enabled() -> bool {
 }
 
 /// Gather all metrics into Prometheus text format.
-pub fn gather_metrics() -> String {
+pub fn gather_metrics() -> anyhow::Result<String> {
     use prometheus::Encoder;
     let encoder = prometheus::TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer).unwrap()
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .context("failed to encode Prometheus metrics")?;
+    String::from_utf8(buffer).context("Prometheus metrics output was not valid UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gather_metrics, init_metrics, metrics_enabled};
+
+    #[test]
+    fn init_metrics_is_idempotent_and_scrape_does_not_panic() {
+        init_metrics();
+        init_metrics();
+
+        assert!(metrics_enabled());
+        let metrics = gather_metrics().expect("metrics scrape should succeed");
+
+        assert!(metrics.contains("ferrotunnel_tunnel_frames_processed_total"));
+    }
 }
