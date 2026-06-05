@@ -21,6 +21,7 @@ hyper = { version = "1", features = ["full", "http2"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["full", "server-auto", "tokio"] }
 bytes = { workspace = true }
+libc = "0.2"
 tracing = "0.1"
 uuid = { workspace = true }
 futures = "0.3"

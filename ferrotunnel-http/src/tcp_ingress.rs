@@ -3,6 +3,7 @@
 //! Provides protocol-agnostic TCP forwarding through the tunnel.
 //! Useful for database connections, SSH, and custom protocols.
 
+use crate::accept_errors::is_transient_accept_error;
 use ferrotunnel_common::Result;
 use ferrotunnel_core::tunnel::session::SessionStoreBackend;
 use ferrotunnel_protocol::frame::Protocol;
@@ -73,7 +74,18 @@ impl TcpIngress {
         info!("TCP Ingress listening on {}", self.addr);
 
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let (stream, peer_addr) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) if is_transient_accept_error(&error) => {
+                    warn!(
+                        bind_addr = %self.addr,
+                        error = %error,
+                        "Transient TCP ingress accept error; continuing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
 
             // CRITICAL: Set TCP_NODELAY to disable Nagle's algorithm for low latency
             if let Err(e) = stream.set_nodelay(true) {
