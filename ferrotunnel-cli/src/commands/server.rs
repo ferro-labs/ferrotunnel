@@ -1,6 +1,6 @@
 //! Server subcommand implementation
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Args;
 use ferrotunnel_core::TunnelServer;
 use ferrotunnel_observability::{
@@ -93,6 +93,10 @@ pub struct ServerArgs {
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(args: ServerArgs) -> Result<()> {
+    if args.tls_client_auth && args.tls_ca.is_none() {
+        bail!("--tls-client-auth requires --tls-ca to be provided");
+    }
+
     let enable_tracing = args.observability;
     let enable_metrics = args.metrics;
 
@@ -136,9 +140,6 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         if let Some(ca_path) = &args.tls_ca {
             info!("TLS Client Authentication enabled with CA: {:?}", ca_path);
             server = server.with_client_auth(ca_path.clone());
-        } else if args.tls_client_auth {
-            error!("--tls-client-auth requires --tls-ca to be provided");
-            std::process::exit(1);
         }
     }
     let sessions = server.sessions();
@@ -299,4 +300,50 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_args_with_client_auth_without_ca() -> ServerArgs {
+        ServerArgs {
+            bind: "127.0.0.1:0".parse().expect("valid bind address"),
+            token: "test-token".to_string(),
+            log_level: "info".to_string(),
+            http_bind: "127.0.0.1:0".parse().expect("valid HTTP bind address"),
+            metrics_bind: "127.0.0.1:0".parse().expect("valid metrics bind address"),
+            tls_cert: Some(PathBuf::from("cert.pem")),
+            tls_key: Some(PathBuf::from("key.pem")),
+            tls_ca: None,
+            tls_client_auth: true,
+            tcp_bind: None,
+            #[cfg(feature = "http3")]
+            http3_bind: None,
+            #[cfg(feature = "http3")]
+            http3_cert: None,
+            #[cfg(feature = "http3")]
+            http3_key: None,
+            observability: false,
+            metrics: false,
+            #[cfg(feature = "quic")]
+            quic_bind: None,
+            #[cfg(feature = "quic")]
+            quic_cert: None,
+            #[cfg(feature = "quic")]
+            quic_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tls_client_auth_without_ca_returns_error() {
+        let err = run(server_args_with_client_auth_without_ca())
+            .await
+            .expect_err("missing CA should be returned as an error");
+
+        assert_eq!(
+            err.to_string(),
+            "--tls-client-auth requires --tls-ca to be provided",
+        );
+    }
 }
