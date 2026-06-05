@@ -9,9 +9,6 @@ use std::time::Duration;
 /// Test client connecting to server over TLS
 #[tokio::test]
 async fn test_tls_connection() {
-    let _ = rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
     let config = TestConfig::default();
 
     // Create temp directory for certs
