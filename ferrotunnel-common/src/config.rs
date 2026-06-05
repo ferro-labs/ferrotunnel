@@ -18,6 +18,12 @@ pub struct TlsConfig {
     pub server_name: Option<String>,
     /// Require client certificate authentication
     pub client_auth: bool,
+    /// Skip certificate verification (insecure, for self-signed certs only).
+    ///
+    /// Enabling this leaves TLS connections unauthenticated and vulnerable to
+    /// man-in-the-middle interception. Client config builders emit a warning
+    /// whenever this is used.
+    pub skip_verify: bool,
 }
 
 /// Resource limits configuration
@@ -93,6 +99,10 @@ pub struct QuicConfig {
     pub max_idle_timeout_secs: Option<u64>,
     /// Keep-alive interval in seconds (default: 10)
     pub keep_alive_interval_secs: Option<u64>,
-    /// Skip certificate verification (insecure, for self-signed certs)
+    /// Skip certificate verification (insecure, for self-signed certs only).
+    ///
+    /// Enabling this leaves QUIC connections unauthenticated and vulnerable to
+    /// man-in-the-middle interception. Client config builders emit a warning
+    /// whenever this is used.
     pub skip_verify: bool,
 }
