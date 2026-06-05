@@ -49,6 +49,8 @@
 //!         .build()?;
 //!
 //!     server.start().await?;
+//!     tokio::signal::ctrl_c().await?;
+//!     server.shutdown().await?;
 //!     Ok(())
 //! }
 //! ```

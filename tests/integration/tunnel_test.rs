@@ -2,7 +2,7 @@
 //!
 //! Tests basic tunnel functionality: server, client, HTTP routing
 
-use super::{start_echo_server, wait_for_server, TestConfig};
+use super::{start_echo_server, start_test_server, TestConfig};
 use ferrotunnel::{Client, Server};
 use std::time::Duration;
 
@@ -18,17 +18,10 @@ async fn test_server_starts() {
         .build()
         .expect("Failed to build server");
 
-    // Start server in background
-    let server_handle = tokio::spawn(async move { server.start().await });
-
-    // Wait for server to be ready
-    assert!(
-        wait_for_server(config.server_addr, Duration::from_secs(5)).await,
-        "Server did not start in time"
-    );
-
-    // Clean up
-    server_handle.abort();
+    server.start().await.expect("Failed to start server");
+    assert!(server.is_running());
+    server.shutdown().await.expect("Failed to stop server");
+    assert!(!server.is_running());
 }
 
 /// Test that client connects to server
@@ -39,23 +32,7 @@ async fn test_client_connects() {
     // Start local service
     let _echo_handle = start_echo_server(config.local_service_addr).await;
 
-    // Start server
-    let mut server = Server::builder()
-        .bind(config.server_addr)
-        .http_bind(config.http_addr)
-        .token(config.token)
-        .build()
-        .expect("Failed to build server");
-
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
-
-    // Wait for server
-    assert!(
-        wait_for_server(config.server_addr, Duration::from_secs(5)).await,
-        "Server did not start"
-    );
+    let mut server = start_test_server(&config).await;
 
     // Build and start client
     let mut client = Client::builder()
@@ -77,6 +54,7 @@ async fn test_client_connects() {
 
     // Shutdown
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 /// Test full HTTP request through tunnel
@@ -87,20 +65,7 @@ async fn test_http_through_tunnel() {
     // Start local echo service
     let _echo_handle = start_echo_server(config.local_service_addr).await;
 
-    // Start server
-    let mut server = Server::builder()
-        .bind(config.server_addr)
-        .http_bind(config.http_addr)
-        .token(config.token)
-        .build()
-        .expect("Failed to build server");
-
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
-
-    // Wait for server
-    assert!(wait_for_server(config.server_addr, Duration::from_secs(5)).await);
+    let mut server = start_test_server(&config).await;
 
     // Start client
     let mut client = Client::builder()
@@ -143,6 +108,7 @@ async fn test_http_through_tunnel() {
     );
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 /// Test large payload handling
@@ -153,19 +119,7 @@ async fn test_large_payload() {
     // Start local sink service that reads everything and replies OK
     let _sink_handle = super::start_sink_server(config.local_service_addr).await;
 
-    // Start server
-    let mut server = Server::builder()
-        .bind(config.server_addr)
-        .http_bind(config.http_addr)
-        .token(config.token)
-        .build()
-        .expect("Failed to build server");
-
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
-
-    assert!(wait_for_server(config.server_addr, Duration::from_secs(5)).await);
+    let mut server = start_test_server(&config).await;
 
     // Start client
     let mut client = Client::builder()
@@ -205,4 +159,5 @@ async fn test_large_payload() {
     );
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }

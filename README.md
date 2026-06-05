@@ -234,7 +234,9 @@ async fn main() -> ferrotunnel::Result<()> {
         .token("my-secret-token")
         .build()?;
 
-    server.start().await
+    server.start().await?;
+    tokio::signal::ctrl_c().await?;
+    server.shutdown().await
 }
 ```
 

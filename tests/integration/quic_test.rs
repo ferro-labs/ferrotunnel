@@ -219,7 +219,7 @@ async fn test_public_api_quic_routing() {
         .build()
         .expect("Failed to build QUIC server");
 
-    let server_handle = tokio::spawn(async move { server.start().await });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_quic_server(quic_addr, &cert_path, Duration::from_secs(5)).await,
@@ -262,6 +262,6 @@ async fn test_public_api_quic_routing() {
     assert!(text.contains("Hello, World!"));
 
     let _ = client.shutdown().await;
-    server_handle.abort();
+    let _ = server.shutdown().await;
     let _ = std::fs::remove_dir_all(temp_dir);
 }

@@ -84,7 +84,7 @@ async fn test_http3_request_through_tunnel_and_alt_svc_advertised() {
         .token(token)
         .build()
         .expect("Failed to build HTTP/3 server");
-    let server_handle = tokio::spawn(async move { server.start().await });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_server(context.server_addr, Duration::from_secs(5)).await,
@@ -129,7 +129,7 @@ async fn test_http3_request_through_tunnel_and_alt_svc_advertised() {
     assert!(body.contains("Hello, World!"));
 
     let _ = client.shutdown().await;
-    server_handle.abort();
+    let _ = server.shutdown().await;
 }
 
 #[tokio::test]
@@ -150,7 +150,7 @@ async fn test_http3_unknown_host_returns_not_found() {
         .token("test-http3-token")
         .build()
         .expect("Failed to build HTTP/3 server");
-    let server_handle = tokio::spawn(async move { server.start().await });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_server(context.server_addr, Duration::from_secs(5)).await,
@@ -162,7 +162,7 @@ async fn test_http3_unknown_host_returns_not_found() {
     assert_eq!(status, http::StatusCode::NOT_FOUND);
     assert_eq!(body, "Tunnel not found");
 
-    server_handle.abort();
+    let _ = server.shutdown().await;
 }
 
 async fn send_h3_get(

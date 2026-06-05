@@ -95,9 +95,7 @@ async fn test_grpc_tunnel() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_server(server_addr, Duration::from_secs(5)).await,
@@ -189,6 +187,9 @@ async fn test_grpc_tunnel() {
         Some("0"),
         "Expected grpc-status: 0 trailer to be preserved through the tunnel"
     );
+
+    let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 /// Verifies that ordinary HTTP/1.1 requests are NOT classified as gRPC
@@ -240,9 +241,7 @@ async fn test_non_grpc_not_classified_as_grpc() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_server(server_addr, Duration::from_secs(5)).await,
@@ -287,4 +286,7 @@ async fn test_non_grpc_not_classified_as_grpc() {
         ct, "text/plain",
         "Expected text/plain, not gRPC content-type"
     );
+
+    let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
