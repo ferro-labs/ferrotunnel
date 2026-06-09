@@ -12,7 +12,7 @@ Observability infrastructure for FerroTunnel, providing metrics, distributed tra
 
 ## Dashboard
 
-The built-in dashboard provides a web UI for monitoring and debugging tunnel traffic.
+The built-in dashboard provides a web UI for monitoring and debugging tunnel traffic. It binds to loopback by default; exposed binds should be paired with a dashboard auth token.
 
 ### Features
 
@@ -42,13 +42,16 @@ async fn main() {
     let broadcaster = Arc::new(EventBroadcaster::new(100));
 
     // Create the dashboard router
-    let app = create_router(state.clone(), broadcaster.clone());
+    let app = create_router(state.clone(), broadcaster.clone(), Some("dashboard-token".to_string()));
 
     // Serve the dashboard
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4040").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 ```
+
+
+By default, the CLI dashboard binds to `127.0.0.1:4040`. Binding to a non-loopback address requires both `--dashboard-bind` and `--dashboard-allow-non-loopback`. The CLI always protects dashboard API routes: set `--dashboard-auth-token` or `FERROTUNNEL_DASHBOARD_AUTH_TOKEN` to choose the token, or use the generated token URL printed at startup. The embedded UI stores `?token=` in session storage and prompts again if the API returns `401`.
 
 ### API Endpoints
 
@@ -109,10 +112,12 @@ Observability is **disabled by default** for maximum performance. Enable it with
 
 ```bash
 # Server with observability enabled
-ferrotunnel server --token secret --observability
+export FERROTUNNEL_TOKEN=secret
+ferrotunnel server --observability
 
 # Client with observability enabled
-ferrotunnel client --server localhost:7835 --token secret --observability
+export FERROTUNNEL_TOKEN=secret
+ferrotunnel client --server localhost:7835 --observability
 ```
 
 Or via environment variable:

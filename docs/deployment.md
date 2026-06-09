@@ -132,9 +132,9 @@ export RUST_LOG="info"                            # Log level
 
 # TLS (optional)
 export FERROTUNNEL_TLS="true"                     # Enable TLS
-export FERROTUNNEL_TLS_CA="/path/to/ca.crt"      # CA certificate
+export FERROTUNNEL_TLS_CA="/path/to/ca.crt"      # Required for verified TLS
 export FERROTUNNEL_TLS_SERVER_NAME="tunnel.example.com"  # SNI hostname
-export FERROTUNNEL_TLS_SKIP_VERIFY="false"       # Skip cert verification
+export FERROTUNNEL_TLS_SKIP_VERIFY="false"       # Explicit insecure mode only
 
 # Mutual TLS (optional)
 export FERROTUNNEL_TLS_CERT="/path/to/client.crt"

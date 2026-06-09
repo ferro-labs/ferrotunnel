@@ -20,10 +20,17 @@ ferrotunnel <COMMAND> [OPTIONS]
 
 ### Server
 
-Run the tunnel server:
+Run the tunnel server. Prefer the environment, a token file, or the secure prompt so the token is not exposed in process arguments.
 
 ```bash
-ferrotunnel server --token my-secret-token
+export FERROTUNNEL_TOKEN=my-secret-token
+ferrotunnel server
+
+# Or read the token from a secret file
+ferrotunnel server --token-file /run/secrets/ferrotunnel-token
+
+# Or omit both to enter the token securely at the prompt
+ferrotunnel server
 ```
 
 **Options:**
@@ -33,7 +40,8 @@ ferrotunnel server --token my-secret-token
 | `--bind` | `FERROTUNNEL_BIND` | `0.0.0.0:7835` | Tunnel control plane address |
 | `--http-bind` | `FERROTUNNEL_HTTP_BIND` | `0.0.0.0:8080` | HTTP ingress address |
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress address (optional) |
-| `--token` | `FERROTUNNEL_TOKEN` | (required) | Authentication token |
+| `--token` | `FERROTUNNEL_TOKEN` | (optional) | Authentication token; avoid for shared systems because argv can expose it |
+| `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read authentication token from a file |
 | `--log-level` | `RUST_LOG` | `info` | Log level |
 | `--metrics-bind` | `FERROTUNNEL_METRICS_BIND` | `0.0.0.0:9090` | Prometheus metrics address |
 | `--observability` | `FERROTUNNEL_OBSERVABILITY` | `false` | Enable tracing |
@@ -57,9 +65,6 @@ ferrotunnel server --token my-secret-token
 Run the tunnel client:
 
 ```bash
-# With token on command line
-ferrotunnel client --server tunnel.example.com:7835 --token my-secret-token
-
 # Token from environment (recommended for scripts)
 export FERROTUNNEL_TOKEN=my-secret-token
 ferrotunnel client --server tunnel.example.com:7835
@@ -78,13 +83,16 @@ ferrotunnel client --server tunnel.example.com:7835
 | `--local-addr` | `FERROTUNNEL_LOCAL_ADDR` | `127.0.0.1:8000` | Local service to forward |
 | `--tunnel-id` | `FERROTUNNEL_TUNNEL_ID` | (auto) | Tunnel ID for HTTP routing (matched against Host header) |
 | `--dashboard-port` | `FERROTUNNEL_DASHBOARD_PORT` | `4040` | Dashboard port |
+| `--dashboard-bind` | `FERROTUNNEL_DASHBOARD_BIND` | `127.0.0.1` | Dashboard bind address |
+| `--dashboard-allow-non-loopback` | `FERROTUNNEL_DASHBOARD_ALLOW_NON_LOOPBACK` | `false` | Allow exposed dashboard bind; requires auth token |
+| `--dashboard-auth-token` | `FERROTUNNEL_DASHBOARD_AUTH_TOKEN` | generated | Dashboard API auth token |
 | `--no-dashboard` | - | `false` | Disable dashboard |
 | `--log-level` | `RUST_LOG` | `info` | Log level |
 | `--observability` | `FERROTUNNEL_OBSERVABILITY` | `false` | Enable tracing |
 | `--metrics` | `FERROTUNNEL_METRICS` | `false` | Enable metrics collection |
-| `--tls` | `FERROTUNNEL_TLS` | `false` | Enable TLS |
-| `--tls-skip-verify` | `FERROTUNNEL_TLS_SKIP_VERIFY` | `false` | Skip certificate verification |
-| `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate path |
+| `--tls` | `FERROTUNNEL_TLS` | `false` | Enable TLS; requires `--tls-ca` unless `--tls-skip-verify` is explicit |
+| `--tls-skip-verify` | `FERROTUNNEL_TLS_SKIP_VERIFY` | `false` | Explicit insecure mode; skip certificate verification |
+| `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate path for verified TLS |
 | `--tls-server-name` | `FERROTUNNEL_TLS_SERVER_NAME` | - | SNI hostname |
 | `--tls-cert` | `FERROTUNNEL_TLS_CERT` | - | Client certificate (mTLS) |
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | Client private key (mTLS) |
@@ -106,10 +114,12 @@ ferrotunnel version
 ### Quick Start
 
 ```bash
-# Terminal 1: Start server
-ferrotunnel server --token secret
+# Terminal 1: Start server (token from env or prompt if omitted)
+export FERROTUNNEL_TOKEN=secret
+ferrotunnel server
 
-# Terminal 2: Start client (token from env or prompt if omitted)
+# Terminal 2: Start client (use the same token via env or prompt)
+export FERROTUNNEL_TOKEN=secret
 ferrotunnel client --server localhost:7835 --local-addr 127.0.0.1:8080
 
 # Terminal 3: Start local service
@@ -119,14 +129,16 @@ python3 -m http.server 8080
 ### With TLS
 
 ```bash
-# Server with TLS
-ferrotunnel server --token secret \
+# Server with TLS (token from env or prompt if omitted)
+ferrotunnel server \
   --tls-cert server.crt --tls-key server.key
 
-# Client with TLS
-ferrotunnel client --server tunnel.example.com:7835 --token secret \
+# Client with TLS (token from env or prompt if omitted)
+ferrotunnel client --server tunnel.example.com:7835 \
   --tls --tls-ca ca.crt
 ```
+
+`--tls` requires `--tls-ca` for certificate verification. Use `--tls-skip-verify` only when explicitly accepting insecure self-signed testing mode.
 
 ### With QUIC Transport
 
@@ -134,13 +146,13 @@ ferrotunnel client --server tunnel.example.com:7835 --token secret \
 # Build with QUIC support
 cargo install ferrotunnel-cli --features quic
 
-# Server with QUIC endpoint
-ferrotunnel server --token secret \
+# Server with QUIC endpoint (token from env or prompt if omitted)
+ferrotunnel server \
   --tls-cert server.crt --tls-key server.key \
   --quic-bind 0.0.0.0:7836
 
-# Client connecting via QUIC
-ferrotunnel client --server 127.0.0.1:7836 --token secret \
+# Client connecting via QUIC (token from env or prompt if omitted)
+ferrotunnel client --server 127.0.0.1:7836 \
   --quic --tls-skip-verify
 ```
 
@@ -151,7 +163,8 @@ ferrotunnel client --server 127.0.0.1:7836 --token secret \
 cargo install ferrotunnel-cli --features http3
 
 # HTTP/1.1 + HTTP/2 ingress on TCP :8080; HTTP/3 ingress on UDP :8443
-ferrotunnel server --token secret \
+# Token is read from FERROTUNNEL_TOKEN, --token-file, or the secure prompt.
+ferrotunnel server \
   --http-bind 0.0.0.0:8080 \
   --http3-bind 0.0.0.0:8443 \
   --tls-cert server.crt \
@@ -164,16 +177,23 @@ strict `Host`-based tunnel routing as the regular HTTP ingress.
 
 ### Using Environment Variables
 
-Avoid putting the token on the command line (visible in process list and shell history). Use the environment or a secure prompt instead:
+Avoid putting the token on the command line: `--token` can be visible in process listings and shell history. Use the environment, a server token file, or the secure prompt instead:
 
 ```bash
 export FERROTUNNEL_TOKEN=my-secret-token
-export FERROTUNNEL_SERVER=tunnel.example.com:7835
 
+# Server reads FERROTUNNEL_TOKEN or prompts when omitted
+ferrotunnel server
+
+# Server can also read from a file managed by your secret store
+ferrotunnel server --token-file /run/secrets/ferrotunnel-token
+
+# Client reads FERROTUNNEL_TOKEN or prompts when omitted
+export FERROTUNNEL_SERVER=tunnel.example.com:7835
 ferrotunnel client --local-addr 127.0.0.1:3000
 ```
 
-If `--token` and `FERROTUNNEL_TOKEN` are both unset, the client prompts for the token on the TTY (input is not echoed).
+For the server, if `--token`, `FERROTUNNEL_TOKEN`, and `--token-file` are unset, the CLI prompts for the token on the TTY (input is not echoed). The client prompts when `--token` and `FERROTUNNEL_TOKEN` are unset.
 
 ## Developer Tools
 

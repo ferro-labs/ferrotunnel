@@ -1,13 +1,13 @@
 //! Server subcommand implementation
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use ferrotunnel_core::TunnelServer;
 use ferrotunnel_observability::{
     gather_metrics, init_basic_observability, init_minimal_logging, shutdown_tracing,
 };
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
 #[derive(Args, Debug)]
@@ -16,9 +16,13 @@ pub struct ServerArgs {
     #[arg(long, default_value = "0.0.0.0:7835", env = "FERROTUNNEL_BIND")]
     bind: SocketAddr,
 
-    /// Authentication token
-    #[arg(long, env = "FERROTUNNEL_TOKEN")]
-    token: String,
+    /// Authentication token. If omitted, uses FERROTUNNEL_TOKEN, --token-file, or prompts securely.
+    #[arg(long, env = "FERROTUNNEL_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+
+    /// Read the authentication token from a file. Trailing newlines are ignored.
+    #[arg(long, env = "FERROTUNNEL_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
 
     /// Log level
     #[arg(long, default_value = "info", env = "RUST_LOG")]
@@ -91,6 +95,32 @@ pub struct ServerArgs {
     quic_key: Option<PathBuf>,
 }
 
+/// Resolve token from args, then env, then token file, then secure prompt.
+fn resolve_token(args: &ServerArgs) -> Result<String> {
+    if let Some(ref t) = args.token {
+        return Ok(t.clone());
+    }
+    if let Ok(t) = std::env::var("FERROTUNNEL_TOKEN") {
+        return Ok(t);
+    }
+    if let Some(ref path) = args.token_file {
+        return read_token_file(path);
+    }
+    prompt_token()
+}
+
+fn read_token_file(path: &Path) -> Result<String> {
+    let token = std::fs::read_to_string(path)
+        .with_context(|| format!("Could not read token file {}", path.display()))?;
+    Ok(token.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+/// Prompt for token on TTY without echoing (secure input).
+fn prompt_token() -> Result<String> {
+    rpassword::prompt_password("Token: ")
+        .context("Could not read token from terminal (is stdin a TTY?). Set FERROTUNNEL_TOKEN, pass --token-file, or pass --token")
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn run(args: ServerArgs) -> Result<()> {
     let enable_tracing = args.observability;
@@ -124,7 +154,8 @@ pub async fn run(args: ServerArgs) -> Result<()> {
 
     info!("Starting FerroTunnel Server v{}", env!("CARGO_PKG_VERSION"));
 
-    let mut server = TunnelServer::new(args.bind, args.token.clone());
+    let token = resolve_token(&args)?;
+    let mut server = TunnelServer::new(args.bind, token.clone());
 
     if let (Some(cert_path), Some(key_path)) = (&args.tls_cert, &args.tls_key) {
         info!(
@@ -158,7 +189,7 @@ pub async fn run(args: ServerArgs) -> Result<()> {
 
     // 2. Token Auth
     registry.register(std::sync::Arc::new(tokio::sync::RwLock::new(
-        ferrotunnel_plugin::builtin::TokenAuthPlugin::new(vec![args.token.clone()]),
+        ferrotunnel_plugin::builtin::TokenAuthPlugin::new(vec![token.clone()]),
     )));
 
     let registry = std::sync::Arc::new(registry);
@@ -190,12 +221,14 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     };
 
     info!("Starting HTTP Ingress on {}", args.http_bind);
-    let mut http_ingress =
+    let http_ingress =
         ferrotunnel_http::HttpIngress::new(args.http_bind, sessions.clone(), registry.clone());
     #[cfg(feature = "http3")]
-    if let Some((_, _, Some(alt_svc))) = &http3_start {
-        http_ingress = http_ingress.with_alt_svc_header(alt_svc.clone());
-    }
+    let http_ingress = if let Some((_, _, Some(alt_svc))) = &http3_start {
+        http_ingress.with_alt_svc_header(alt_svc.clone())
+    } else {
+        http_ingress
+    };
     let http_handle = tokio::spawn(async move { http_ingress.start().await });
 
     // Start TCP Ingress (if enabled)
@@ -238,7 +271,7 @@ pub async fn run(args: ServerArgs) -> Result<()> {
                     .map(|p| p.to_string_lossy().to_string()),
                 ..Default::default()
             };
-            let quic_server = TunnelServer::new(args.bind, args.token.clone())
+            let quic_server = TunnelServer::new(args.bind, token.clone())
                 .with_transport(ferrotunnel_core::transport::TransportConfig::Quic(
                     quic_config,
                 ))
@@ -299,4 +332,27 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn read_token_file_trims_trailing_line_endings() {
+        let path = std::env::temp_dir().join(format!(
+            "ferrotunnel-token-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, "secret\r\n\n").expect("token test file should be writable");
+
+        let token = read_token_file(&path).expect("token file should be readable");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(token, "secret");
+    }
 }

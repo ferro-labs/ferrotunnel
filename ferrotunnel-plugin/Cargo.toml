@@ -19,6 +19,7 @@ tracing = { workspace = true }
 http = "1.1"
 tokio = { workspace = true }
 governor = "0.10"
+subtle = "2"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

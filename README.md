@@ -36,10 +36,10 @@ cargo install ferrotunnel-cli
 
 ```bash
 
-# Start server
-ferrotunnel server --token secret
+# Start server; enter the token at the prompt or set FERROTUNNEL_TOKEN
+ferrotunnel server
 
-# Start client (in another terminal; token from env or secure prompt if omitted)
+# Start client in another terminal; use the same token via env or prompt
 ferrotunnel client --server localhost:7835 --local-addr 127.0.0.1:8080 --tunnel-id my-app
 ```
 
@@ -150,11 +150,14 @@ FerroTunnel v1.0.7+ supports QUIC as an alternative transport for the tunnel con
 cargo build --features quic
 
 # Server: keep the TCP control plane on :7835 and add a shared-state QUIC listener on :7836
-ferrotunnel server --token secret --quic-bind 0.0.0.0:7836 --tls-cert server.crt --tls-key server.key
+# Token is read from FERROTUNNEL_TOKEN, --token-file, or the secure prompt.
+ferrotunnel server --quic-bind 0.0.0.0:7836 --tls-cert server.crt --tls-key server.key
 
 # Client: connect via QUIC
 ferrotunnel client --server 127.0.0.1:7836 --quic --tls-skip-verify
 ```
+
+`--tls-skip-verify` is explicit insecure mode for local or self-signed testing only.
 
 **Library**:
 
@@ -206,7 +209,8 @@ HTTP/3 ingress is separate from QUIC tunnel transport: it uses `h3` +
 cargo build -p ferrotunnel-cli --features http3
 
 # Server: HTTP/1.1+HTTP/2 on TCP :8080, HTTP/3 on UDP :8443
-ferrotunnel server --token secret \
+# Token is read from FERROTUNNEL_TOKEN, --token-file, or the secure prompt.
+ferrotunnel server \
   --http-bind 0.0.0.0:8080 \
   --http3-bind 0.0.0.0:8443 \
   --tls-cert server.crt \
@@ -309,7 +313,8 @@ ferrotunnel server [OPTIONS]
 
 | Option | Env Variable | Default | Description |
 |--------|--------------|---------|-------------|
-| `--token` | `FERROTUNNEL_TOKEN` | required | Auth token |
+| `--token` | `FERROTUNNEL_TOKEN` | optional | Auth token; avoid because argv can expose it |
+| `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read auth token from a file |
 | `--bind` | `FERROTUNNEL_BIND` | `0.0.0.0:7835` | Control plane |
 | `--http-bind` | `FERROTUNNEL_HTTP_BIND` | `0.0.0.0:8080` | HTTP ingress |
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress |
@@ -331,10 +336,15 @@ ferrotunnel client [OPTIONS]
 | `--local-addr` | `FERROTUNNEL_LOCAL_ADDR` | `127.0.0.1:8000` | Local service |
 | `--tunnel-id` | `FERROTUNNEL_TUNNEL_ID` | (auto) | Tunnel ID for HTTP routing |
 | `--dashboard-port` | `FERROTUNNEL_DASHBOARD_PORT` | `4040` | Dashboard port |
-| `--tls` | `FERROTUNNEL_TLS` | false | Enable TLS |
-| `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate |
+| `--dashboard-bind` | `FERROTUNNEL_DASHBOARD_BIND` | `127.0.0.1` | Dashboard bind address |
+| `--dashboard-allow-non-loopback` | `FERROTUNNEL_DASHBOARD_ALLOW_NON_LOOPBACK` | `false` | Allow exposed dashboard bind; requires auth token |
+| `--dashboard-auth-token` | `FERROTUNNEL_DASHBOARD_AUTH_TOKEN` | generated | Dashboard API auth token |
+| `--tls` | `FERROTUNNEL_TLS` | false | Enable TLS; requires `--tls-ca` unless `--tls-skip-verify` is explicit |
+| `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate for verified TLS |
 | `--quic`* | `FERROTUNNEL_QUIC` | false | Use QUIC transport |
 | `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | false | Enable 0-RTT reconnection |
+
+For TCP/TLS clients, `--tls` requires `--tls-ca` unless `--tls-skip-verify` is explicitly set.
 
 *\* Requires `--features quic` at build time.*
 *\*\* Requires `--features http3` at build time.*
@@ -383,8 +393,9 @@ You can pull the official image from GitHub Container Registry:
 # Pull the latest image
 docker pull ghcr.io/ferro-labs/ferrotunnel:latest
 
-# Run as a server
-docker run -p 7835:7835 -p 8080:8080 ghcr.io/ferro-labs/ferrotunnel:latest server --token secret
+# Run as a server using FERROTUNNEL_TOKEN from the host environment
+export FERROTUNNEL_TOKEN=secret
+docker run -e FERROTUNNEL_TOKEN -p 7835:7835 -p 8080:8080 ghcr.io/ferro-labs/ferrotunnel:latest server
 ```
 
 #### Using Docker Compose
