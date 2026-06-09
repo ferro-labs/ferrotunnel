@@ -90,6 +90,13 @@ impl QuicTransportConfig {
 
 /// Create a quinn `ClientConfig` by reusing the existing rustls TLS config infrastructure.
 pub fn create_quinn_client_config(config: &QuicTransportConfig) -> io::Result<ClientConfig> {
+    create_quinn_client_config_with_target(config, config.server_name.as_deref())
+}
+
+fn create_quinn_client_config_with_target(
+    config: &QuicTransportConfig,
+    server_name: Option<&str>,
+) -> io::Result<ClientConfig> {
     // Reuse TLS config creation from tls.rs
     let tls_config = tls::TlsTransportConfig {
         ca_cert_path: config.ca_cert_path.clone(),
@@ -100,7 +107,7 @@ pub fn create_quinn_client_config(config: &QuicTransportConfig) -> io::Result<Cl
         skip_verify: config.skip_verify,
     };
 
-    let rustls_config = tls::create_client_config(&tls_config)?;
+    let rustls_config = tls::create_client_config_with_context(&tls_config, "QUIC", server_name)?;
 
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(config.max_idle_timeout.try_into().map_err(|e| {
@@ -152,7 +159,14 @@ pub fn create_quinn_server_config(config: &QuicTransportConfig) -> io::Result<Se
 
 /// Create a client endpoint bound to an ephemeral UDP port.
 pub fn create_client_endpoint(config: &QuicTransportConfig) -> io::Result<Endpoint> {
-    let client_config = create_quinn_client_config(config)?;
+    create_client_endpoint_with_target(config, config.server_name.as_deref())
+}
+
+fn create_client_endpoint_with_target(
+    config: &QuicTransportConfig,
+    server_name: Option<&str>,
+) -> io::Result<Endpoint> {
+    let client_config = create_quinn_client_config_with_target(config, server_name)?;
     let mut endpoint = Endpoint::client(
         "0.0.0.0:0"
             .parse()
@@ -180,8 +194,6 @@ pub async fn connect(
     addr: &str,
     config: &QuicTransportConfig,
 ) -> io::Result<(Endpoint, quinn::Connection)> {
-    let endpoint = create_client_endpoint(config)?;
-
     let (host, port) = split_host_port(addr)?;
     let socket_addr = tokio::net::lookup_host((host.as_str(), port))
         .await?
@@ -189,6 +201,7 @@ pub async fn connect(
         .ok_or_else(|| io::Error::new(ErrorKind::AddrNotAvailable, "address resolution failed"))?;
 
     let server_name = config.server_name.clone().unwrap_or(host);
+    let endpoint = create_client_endpoint_with_target(config, Some(&server_name))?;
 
     // Validate server name
     let _: ServerName<'_> = ServerName::try_from(server_name.as_str()).map_err(|e| {
