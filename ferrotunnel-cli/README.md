@@ -40,7 +40,7 @@ ferrotunnel server
 | `--bind` | `FERROTUNNEL_BIND` | `0.0.0.0:7835` | Tunnel control plane address |
 | `--http-bind` | `FERROTUNNEL_HTTP_BIND` | `0.0.0.0:8080` | HTTP ingress address |
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress address (optional) |
-| `--token` | `FERROTUNNEL_TOKEN` | (optional) | Authentication token; avoid for shared systems because argv can expose it |
+| _(env only)_ | `FERROTUNNEL_TOKEN` | (optional) | Authentication token; not accepted as a CLI flag so it cannot leak via the process list |
 | `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read authentication token from a file |
 | `--log-level` | `RUST_LOG` | `info` | Log level |
 | `--metrics-bind` | `FERROTUNNEL_METRICS_BIND` | `0.0.0.0:9090` | Prometheus metrics address |
@@ -177,7 +177,7 @@ strict `Host`-based tunnel routing as the regular HTTP ingress.
 
 ### Using Environment Variables
 
-Avoid putting the token on the command line: `--token` can be visible in process listings and shell history. Use the environment, a server token file, or the secure prompt instead:
+Never put the token on the command line — argv is visible in process listings (`ps`) and shell history. The **server does not accept a `--token` flag**; supply its token via the environment, a token file, or the secure prompt. (The client still accepts `--token` for convenience, but the environment or prompt is preferred there too.)
 
 ```bash
 export FERROTUNNEL_TOKEN=my-secret-token
@@ -193,7 +193,7 @@ export FERROTUNNEL_SERVER=tunnel.example.com:7835
 ferrotunnel client --local-addr 127.0.0.1:3000
 ```
 
-For the server, if `--token`, `FERROTUNNEL_TOKEN`, and `--token-file` are unset, the CLI prompts for the token on the TTY (input is not echoed). The client prompts when `--token` and `FERROTUNNEL_TOKEN` are unset.
+For the server, if `FERROTUNNEL_TOKEN` and `--token-file` are unset, the CLI prompts for the token on the TTY (input is not echoed). The client prompts when `--token` and `FERROTUNNEL_TOKEN` are unset.
 
 ## Developer Tools
 

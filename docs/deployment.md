@@ -5,12 +5,16 @@
 ### Server
 
 ```bash
+# The server reads its token from FERROTUNNEL_TOKEN (or --token-file, or a
+# secure TTY prompt). It is never accepted as a CLI flag, so it cannot leak
+# via the process list.
+export FERROTUNNEL_TOKEN="your-secret-token"
+
 # Basic server (no TLS)
-ferrotunnel server --bind 0.0.0.0:8080 --token "your-secret-token"
+ferrotunnel server --bind 0.0.0.0:8080
 
 # With TLS
 ferrotunnel server --bind 0.0.0.0:8443 \
-  --token "your-secret-token" \
   --tls-cert /path/to/server.crt \
   --tls-key /path/to/server.key
 ```
@@ -105,13 +109,13 @@ ingress. When enabled, the TCP ingress advertises the HTTP/3 endpoint with an
 ```bash
 cargo build -p ferrotunnel-cli --features http3
 
+export FERROTUNNEL_TOKEN="your-secret-token"
 ferrotunnel server \
   --bind 0.0.0.0:7835 \
   --http-bind 0.0.0.0:8080 \
   --http3-bind 0.0.0.0:8443 \
   --tls-cert /etc/ferrotunnel/server.crt \
-  --tls-key /etc/ferrotunnel/server.key \
-  --token "your-secret-token"
+  --tls-key /etc/ferrotunnel/server.key
 ```
 
 Allow UDP traffic to the HTTP/3 bind port in firewalls and load balancers. The
@@ -222,7 +226,6 @@ services:
     command: >
       server
       --bind 0.0.0.0:7835
-      --token ${FERROTUNNEL_TOKEN}
       --tls-cert /etc/ferrotunnel/server.crt
       --tls-key /etc/ferrotunnel/server.key
     restart: unless-stopped

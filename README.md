@@ -313,7 +313,7 @@ ferrotunnel server [OPTIONS]
 
 | Option | Env Variable | Default | Description |
 |--------|--------------|---------|-------------|
-| `--token` | `FERROTUNNEL_TOKEN` | optional | Auth token; avoid because argv can expose it |
+| _(env only)_ | `FERROTUNNEL_TOKEN` | optional | Auth token; not a CLI flag so it can't leak via argv |
 | `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read auth token from a file |
 | `--bind` | `FERROTUNNEL_BIND` | `0.0.0.0:7835` | Control plane |
 | `--http-bind` | `FERROTUNNEL_HTTP_BIND` | `0.0.0.0:8080` | HTTP ingress |

@@ -16,10 +16,6 @@ pub struct ServerArgs {
     #[arg(long, default_value = "0.0.0.0:7835", env = "FERROTUNNEL_BIND")]
     bind: SocketAddr,
 
-    /// Authentication token. If omitted, uses FERROTUNNEL_TOKEN, --token-file, or prompts securely.
-    #[arg(long, env = "FERROTUNNEL_TOKEN", hide_env_values = true)]
-    token: Option<String>,
-
     /// Read the authentication token from a file. Trailing newlines are ignored.
     #[arg(long, env = "FERROTUNNEL_TOKEN_FILE")]
     token_file: Option<PathBuf>,
@@ -95,11 +91,13 @@ pub struct ServerArgs {
     quic_key: Option<PathBuf>,
 }
 
-/// Resolve token from args, then env, then token file, then secure prompt.
+/// Resolve token from env, then token file, then secure prompt.
+///
+/// The token is deliberately not accepted as a command-line flag: a `--token`
+/// argument would be visible to any local user via the process list (`ps`) and
+/// could leak into shell history. Supply it via `FERROTUNNEL_TOKEN`,
+/// `--token-file`, or the interactive TTY prompt instead.
 fn resolve_token(args: &ServerArgs) -> Result<String> {
-    if let Some(ref t) = args.token {
-        return Ok(t.clone());
-    }
     if let Ok(t) = std::env::var("FERROTUNNEL_TOKEN") {
         return Ok(t);
     }
@@ -118,7 +116,7 @@ fn read_token_file(path: &Path) -> Result<String> {
 /// Prompt for token on TTY without echoing (secure input).
 fn prompt_token() -> Result<String> {
     rpassword::prompt_password("Token: ")
-        .context("Could not read token from terminal (is stdin a TTY?). Set FERROTUNNEL_TOKEN, pass --token-file, or pass --token")
+        .context("Could not read token from terminal (is stdin a TTY?). Set FERROTUNNEL_TOKEN or pass --token-file")
 }
 
 #[allow(clippy::too_many_lines)]
