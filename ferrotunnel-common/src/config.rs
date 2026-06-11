@@ -18,6 +18,16 @@ pub struct TlsConfig {
     pub server_name: Option<String>,
     /// Require client certificate authentication
     pub client_auth: bool,
+    /// Skip certificate verification (insecure, for self-signed certs only).
+    ///
+    /// Enabling this leaves TLS connections unauthenticated and vulnerable to
+    /// man-in-the-middle interception. Client config builders emit a warning
+    /// whenever this is used.
+    ///
+    /// Defaults to `false` so older config files that predate this field
+    /// deserialize without error and keep verification enabled.
+    #[serde(default)]
+    pub skip_verify: bool,
 }
 
 /// Resource limits configuration
@@ -93,6 +103,52 @@ pub struct QuicConfig {
     pub max_idle_timeout_secs: Option<u64>,
     /// Keep-alive interval in seconds (default: 10)
     pub keep_alive_interval_secs: Option<u64>,
-    /// Skip certificate verification (insecure, for self-signed certs)
+    /// Skip certificate verification (insecure, for self-signed certs only).
+    ///
+    /// Enabling this leaves QUIC connections unauthenticated and vulnerable to
+    /// man-in-the-middle interception. Client config builders emit a warning
+    /// whenever this is used.
+    ///
+    /// Defaults to `false` so older config files that predate this field
+    /// deserialize without error and keep verification enabled.
+    #[serde(default)]
     pub skip_verify: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_config_without_skip_verify_defaults_to_secure() {
+        // Simulates a config file written before `skip_verify` existed.
+        let json = r#"{ "enabled": true, "client_auth": false }"#;
+        let config: TlsConfig =
+            serde_json::from_str(json).expect("legacy TLS config must still deserialize");
+        assert!(
+            !config.skip_verify,
+            "missing skip_verify must default to false (verification enabled)"
+        );
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn quic_config_without_skip_verify_defaults_to_secure() {
+        let json = r#"{ "enabled": true, "enable_0rtt": false }"#;
+        let config: QuicConfig =
+            serde_json::from_str(json).expect("legacy QUIC config must still deserialize");
+        assert!(
+            !config.skip_verify,
+            "missing skip_verify must default to false (verification enabled)"
+        );
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn skip_verify_round_trips_when_present() {
+        let json = r#"{ "enabled": true, "client_auth": false, "skip_verify": true }"#;
+        let config: TlsConfig =
+            serde_json::from_str(json).expect("config with skip_verify must deserialize");
+        assert!(config.skip_verify);
+    }
 }

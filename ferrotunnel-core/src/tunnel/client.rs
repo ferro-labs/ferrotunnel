@@ -2,7 +2,7 @@ use crate::auth::validate_token_format;
 use crate::stream::{Multiplexer, PrioritizedFrame, VirtualStream};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, TransportConfig};
-use crate::tunnel::common::clamp_u128_to_u64;
+use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
@@ -21,12 +21,15 @@ use crate::stream::QuicVirtualStream;
 #[cfg(feature = "quic")]
 use crate::transport::quic;
 
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct TunnelClient {
     server_addr: String,
     auth_token: String,
     session_id: Option<Uuid>,
     tunnel_id: Option<String>,
     transport_config: TransportConfig,
+    handshake_timeout: Duration,
 }
 
 impl TunnelClient {
@@ -37,6 +40,7 @@ impl TunnelClient {
             session_id: None,
             tunnel_id: None,
             transport_config: TransportConfig::default(),
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         }
     }
 
@@ -49,6 +53,12 @@ impl TunnelClient {
     #[must_use]
     pub fn with_tunnel_id(mut self, tunnel_id: impl Into<String>) -> Self {
         self.tunnel_id = Some(tunnel_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
         self
     }
 
@@ -222,13 +232,28 @@ impl TunnelClient {
             })))
             .await?;
 
-        let session_id = match ctrl_framed_recv.next().await {
-            Some(Ok(Frame::HandshakeAck {
+        let frame = match read_initial_handshake_frame(
+            &mut ctrl_framed_recv,
+            self.handshake_timeout,
+            "QUIC client",
+        )
+        .await
+        {
+            Ok(frame) => frame,
+            Err(err @ TunnelError::Timeout(_)) => {
+                connection.close(quinn::VarInt::from_u32(0), b"handshake timeout");
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+
+        let session_id = match frame {
+            Frame::HandshakeAck {
                 status,
                 session_id,
                 version,
                 server_capabilities: _,
-            })) => match status {
+            } => match status {
                 HandshakeStatus::Success => {
                     info!(
                         "QUIC handshake successful. Session ID: {}, Protocol v{}",
@@ -248,14 +273,8 @@ impl TunnelClient {
                     )));
                 }
             },
-            Some(Ok(_)) => {
+            _ => {
                 return Err(TunnelError::Protocol("Expected HandshakeAck".into()));
-            }
-            Some(Err(e)) => {
-                return Err(TunnelError::Io(e));
-            }
-            None => {
-                return Err(TunnelError::Connection("Connection closed".into()));
             }
         };
 
@@ -359,39 +378,37 @@ impl TunnelClient {
             })))
             .await?;
 
-        if let Some(result) = framed.next().await {
-            match result? {
-                Frame::HandshakeAck {
-                    status,
-                    session_id,
-                    version,
-                    server_capabilities: _,
-                } => match status {
-                    HandshakeStatus::Success => {
-                        info!(
-                            "Handshake successful. Session ID: {}, Protocol v{}",
-                            session_id, version
-                        );
-                        on_connected(session_id);
-                        Ok(session_id)
-                    }
-                    HandshakeStatus::VersionMismatch => {
-                        error!("Protocol version mismatch. Server requires different version.");
-                        Err(TunnelError::Protocol(
-                            "No compatible protocol version found".into(),
-                        ))
-                    }
-                    status => {
-                        error!("Handshake failed: {:?}", status);
-                        Err(TunnelError::Authentication(format!(
-                            "Handshake rejected: {status:?}"
-                        )))
-                    }
-                },
-                _ => Err(TunnelError::Protocol("Expected HandshakeAck".into())),
-            }
-        } else {
-            Err(TunnelError::Connection("Connection closed".into()))
+        let frame =
+            read_initial_handshake_frame(framed, client.handshake_timeout, "client").await?;
+        match frame {
+            Frame::HandshakeAck {
+                status,
+                session_id,
+                version,
+                server_capabilities: _,
+            } => match status {
+                HandshakeStatus::Success => {
+                    info!(
+                        "Handshake successful. Session ID: {}, Protocol v{}",
+                        session_id, version
+                    );
+                    on_connected(session_id);
+                    Ok(session_id)
+                }
+                HandshakeStatus::VersionMismatch => {
+                    error!("Protocol version mismatch. Server requires different version.");
+                    Err(TunnelError::Protocol(
+                        "No compatible protocol version found".into(),
+                    ))
+                }
+                status => {
+                    error!("Handshake failed: {:?}", status);
+                    Err(TunnelError::Authentication(format!(
+                        "Handshake rejected: {status:?}"
+                    )))
+                }
+            },
+            _ => Err(TunnelError::Protocol("Expected HandshakeAck".into())),
         }
     }
 
@@ -487,5 +504,23 @@ impl TunnelClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handshake_read_times_out_for_silent_peer() {
+        let mut stream = futures::stream::pending::<std::io::Result<Frame>>();
+        let err = read_initial_handshake_frame(&mut stream, Duration::from_millis(1), "client")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TunnelError::Timeout(msg) if msg.contains("client handshake timed out")
+        ));
     }
 }

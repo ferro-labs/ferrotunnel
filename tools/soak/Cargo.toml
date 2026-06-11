@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-ferrotunnel = { version = "1.0.8", path = "../../ferrotunnel" }
+ferrotunnel = { version = "1.1.0", path = "../../ferrotunnel" }
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }

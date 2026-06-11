@@ -28,6 +28,95 @@ const fmtTime = (iso) => new Date(iso).toLocaleTimeString();
 const fmtDuration = (ms) => `${ms}ms`;
 const fmtSize = (bytes) => bytes < 1024 ? `${bytes}B` : `${(bytes / 1024).toFixed(1)}KB`;
 
+const AUTH_TOKEN_KEY = 'ferrotunnel.dashboard.authToken';
+const AUTH_COOKIE_NAME = 'ferrotunnel_dashboard_token';
+
+const HTML_ESCAPE_MAP = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+};
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => HTML_ESCAPE_MAP[char]);
+}
+
+function classToken(value) {
+    return String(value ?? 'unknown').replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase() || 'unknown';
+}
+
+function statusFamily(status) {
+    const family = Math.floor(Number(status) / 100);
+    return family >= 1 && family <= 5 ? `${family}xx` : 'unknown';
+}
+
+function safeHttpUrl(value) {
+    if (!value || value === 'N/A') return null;
+    try {
+        const url = new URL(String(value));
+        return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+    } catch {
+        return null;
+    }
+}
+
+function setDashboardAuthToken(token) {
+    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+    document.cookie = `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; SameSite=Strict`;
+}
+
+function getDashboardAuthToken() {
+    const urlToken = new URLSearchParams(window.location.search).get('token');
+    if (urlToken) {
+        setDashboardAuthToken(urlToken);
+        return urlToken;
+    }
+
+    return sessionStorage.getItem(AUTH_TOKEN_KEY) || '';
+}
+
+function authHeaders(existingHeaders) {
+    const headers = new Headers(existingHeaders || {});
+    const token = getDashboardAuthToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return headers;
+}
+
+async function dashboardFetch(url, init = {}) {
+    const request = () => fetch(url, { ...init, headers: authHeaders(init.headers) });
+    let response = await request();
+    if (response.status !== 401) return response;
+
+    const token = prompt('Dashboard auth token');
+    if (!token) return response;
+
+    setDashboardAuthToken(token);
+    response = await request();
+    return response;
+}
+
+async function dashboardJson(url, init = {}) {
+    const response = await dashboardFetch(url, init);
+    if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+    return response.json();
+}
+
+function apiEventSourceUrl() {
+    const token = getDashboardAuthToken();
+    return token ? `/api/v1/events?token=${encodeURIComponent(token)}` : '/api/v1/events';
+}
+
+function setMessage(containerId, message, color = '') {
+    const container = document.getElementById(containerId);
+    const div = document.createElement('div');
+    div.style.padding = '1rem';
+    if (color) div.style.color = color;
+    div.textContent = message;
+    container.replaceChildren(div);
+}
+
 // Init Chart
 let trafficChart;
 
@@ -127,69 +216,71 @@ function renderStats() {
 }
 
 function renderRequestRow(req) {
-    const tr = document.createElement('tr');
-    tr.dataset.id = req.id;
+    const tr = document.createElement("tr");
+    const method = String(req.method || "");
+    const status = Number(req.status) || 0;
+
+    tr.dataset.id = String(req.id || "");
     tr.innerHTML = `
-        <td><span class="badge-method method-${req.method}">${req.method}</span></td>
-        <td><div style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${req.path}</div></td>
-        <td><span class="status-code status-${Math.floor(req.status / 100)}xx">${req.status}</span></td>
-        <td>${fmtSize(req.response_size || 0)}</td>
-        <td>${fmtDuration(req.duration_ms || 0)}</td>
-        <td style="color:var(--text-secondary)">${fmtTime(req.timestamp)}</td>
+        <td><span class="badge-method method-${classToken(method)}">${escapeHtml(method)}</span></td>
+        <td><div style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(req.path)}</div></td>
+        <td><span class="status-code status-${statusFamily(status)}">${escapeHtml(status)}</span></td>
+        <td>${escapeHtml(fmtSize(req.response_size || 0))}</td>
+        <td>${escapeHtml(fmtDuration(req.duration_ms || 0))}</td>
+        <td style="color:var(--text-secondary)">${escapeHtml(fmtTime(req.timestamp))}</td>
     `;
-    tr.addEventListener('click', () => openDetails(req));
+    tr.addEventListener("click", () => openDetails(req));
     return tr;
 }
-
 function renderRequestList() {
-    els.requestTableBody.innerHTML = '';
+    els.requestTableBody.replaceChildren();
     state.requests.forEach(req => {
         els.requestTableBody.appendChild(renderRequestRow(req));
     });
 }
-
-// Detail Panel
 async function openDetails(summaryReq) {
     state.selectedRequestId = summaryReq.id;
     els.detailsPanel.classList.add('open');
 
-    // Show loading state while fetching full details
-    document.getElementById('detail-method').textContent = summaryReq.method;
-    document.getElementById('detail-method').className = `method-badge method-${summaryReq.method}`;
+    const detailMethod = document.getElementById('detail-method');
+    detailMethod.textContent = summaryReq.method;
+    detailMethod.className = `method-badge method-${classToken(summaryReq.method)}`;
     document.getElementById('detail-path').textContent = summaryReq.path;
 
-    // Clear previous data
-    document.getElementById('detail-req-headers').innerHTML = '<div style="padding:1rem">Loading...</div>';
-    document.getElementById('detail-res-headers').innerHTML = '<div style="padding:1rem">Loading...</div>';
+    setMessage('detail-req-headers', 'Loading...');
+    setMessage('detail-res-headers', 'Loading...');
     document.getElementById('detail-req-body').textContent = 'Loading...';
     document.getElementById('detail-res-body').textContent = 'Loading...';
 
     try {
-        const res = await fetch(`/api/v1/requests/${summaryReq.id}`);
-        if (!res.ok) throw new Error('Failed to fetch details');
-        const req = await res.json();
+        const req = await dashboardJson(`/api/v1/requests/${summaryReq.id}`);
 
-        // Render Headers
         const renderHeaders = (headers, containerId) => {
             const container = document.getElementById(containerId);
+            container.replaceChildren();
             if (!headers || Object.keys(headers).length === 0) {
-                container.innerHTML = '<div style="color:var(--text-muted);padding:1rem">No headers captured</div>';
+                setMessage(containerId, 'No headers captured', 'var(--text-muted)');
                 return;
             }
-            container.innerHTML = Object.entries(headers).map(([k, v]) => `
-                <div><dt>${k}</dt><dd>${v}</dd></div>
-            `).join('');
+
+            Object.entries(headers).forEach(([key, value]) => {
+                const row = document.createElement('div');
+                const name = document.createElement('dt');
+                const headerValue = document.createElement('dd');
+                name.textContent = key;
+                headerValue.textContent = value;
+                row.append(name, headerValue);
+                container.appendChild(row);
+            });
         };
 
         renderHeaders(req.request_headers, 'detail-req-headers');
         renderHeaders(req.response_headers, 'detail-res-headers');
 
-        // Render Body
         const renderBody = (body, containerId) => {
             const container = document.getElementById(containerId);
-            if (!body) { container.innerHTML = '// No body content'; return; }
+            if (!body) { container.textContent = '// No body content'; return; }
             try {
-                // If body is already a string but potentially JSON
                 if (typeof body !== 'string') body = JSON.stringify(body, null, 2);
                 const json = JSON.parse(body);
                 container.textContent = JSON.stringify(json, null, 2);
@@ -203,28 +294,24 @@ async function openDetails(summaryReq) {
 
     } catch (e) {
         console.error("Error fetching details", e);
-        document.getElementById('detail-req-headers').innerHTML = '<div style="color:red;padding:1rem">Error loading details</div>';
+        setMessage('detail-req-headers', 'Error loading details', 'red');
     }
 
-    // Reset tabs
     document.querySelectorAll('.tab-link').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     document.querySelector('.tab-link[data-tab="req-headers"]').classList.add('active');
     document.getElementById('req-headers').classList.add('active');
 }
-
-// Data Fetching
 async function fetchInitialData() {
     try {
-        const [tunnelsRes, reqsRes, healthRes] = await Promise.all([
-            fetch('/api/v1/tunnels'),
-            fetch('/api/v1/requests'),
-            fetch('/api/v1/health')
+        const [tunnels, requests, health] = await Promise.all([
+            dashboardJson('/api/v1/tunnels'),
+            dashboardJson('/api/v1/requests'),
+            dashboardJson('/api/v1/health')
         ]);
 
-        state.tunnels = await tunnelsRes.json();
-        state.requests = await reqsRes.json();
-        const health = await healthRes.json();
+        state.tunnels = tunnels;
+        state.requests = requests;
 
         if (health && health.version) {
             const verEl = document.getElementById('setting-version');
@@ -237,12 +324,12 @@ async function fetchInitialData() {
         renderRequestList();
         renderTunnels();
         renderAllRequests();
+        return true;
     } catch (e) {
         console.error("Failed to fetch initial data", e);
+        return false;
     }
 }
-
-// Render Tunnels (New)
 function renderTunnels() {
     const container = document.getElementById('tunnels-list');
     if (!state.tunnels.length) {
@@ -258,7 +345,12 @@ function renderTunnels() {
 
     container.innerHTML = state.tunnels.map(t => {
         const statusStyle = getStatusStyle(t.status);
-        const hasPublicUrl = t.public_url && t.public_url !== 'N/A';
+        const publicUrlText = t.public_url && t.public_url !== 'N/A' ? String(t.public_url) : '';
+        const publicUrl = safeHttpUrl(publicUrlText);
+        const subdomain = escapeHtml(t.subdomain || 'Local Tunnel');
+        const localAddr = escapeHtml(t.local_addr);
+        const statusText = escapeHtml(String(t.status || 'unknown').toUpperCase());
+        const publicUrlDisplay = publicUrlText ? `${escapeHtml(publicUrlText)} <span style="margin:0 0.5rem; opacity:0.5">→</span>` : '';
         return `
         <div class="tunnel-item" style="display:flex; justify-content:space-between; align-items:center; padding:1.25rem; background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:0.75rem; margin-bottom:1rem;">
             <div style="display:flex; align-items:center; gap:1rem;">
@@ -267,68 +359,56 @@ function renderTunnels() {
                 </div>
                 <div>
                     <div style="font-weight:600; font-size:1.05rem; margin-bottom:0.25rem; display:flex; align-items:center; gap:0.5rem;">
-                        ${t.subdomain || 'Local Tunnel'}
-                        ${hasPublicUrl ? `<a href="${t.public_url}" target="_blank" style="color:var(--text-secondary); text-decoration:none; display:flex; align-items:center" title="Open URL">
+                        ${subdomain}
+                        ${publicUrl ? `<a href="${escapeHtml(publicUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--text-secondary); text-decoration:none; display:flex; align-items:center" title="Open URL">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
                         </a>` : ''}
                     </div>
                     <div style="color:var(--text-secondary); font-family:var(--font-mono); font-size:0.85rem;">
-                        ${hasPublicUrl ? `${t.public_url} <span style="margin:0 0.5rem; opacity:0.5">→</span>` : ''} ${t.local_addr}
+                        ${publicUrlDisplay} ${localAddr}
                     </div>
                 </div>
             </div>
             <div style="text-align:right">
                 <span class="status-indicator" style="display:inline-flex; align-items:center; gap:0.4rem; background:${statusStyle.bg}; color:${statusStyle.color}; padding:0.4rem 0.75rem; border-radius:2rem; font-size:0.85rem; font-weight:500;">
                     <span style="width:6px; height:6px; border-radius:50%; background:currentColor"></span>
-                    ${t.status.toUpperCase()}
+                    ${statusText}
                 </span>
                 <div style="margin-top:0.5rem; font-size:0.8rem; color:var(--text-muted)">
-                    Created ${fmtTime(t.created_at)}
+                    Created ${escapeHtml(fmtTime(t.created_at))}
                 </div>
             </div>
         </div>
     `}).join('');
 }
-
-// Render All Requests (New)
 function renderAllRequests() {
     const container = document.querySelector('#view-requests .card > div');
-    // Using simple reuse of the logic but customized for view
-    const tableHtml = `
-    <div class="table-responsive">
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th>Method</th>
-                    <th>Path</th>
-                    <th>Status</th>
-                    <th>Size</th>
-                    <th>Duration</th>
-                    <th>Time</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${state.requests.map(req => {
-        return `
-                    <tr onclick='openDetails(${JSON.stringify(req).replace(/'/g, "&apos;")})'>
-                        <td><span class="badge-method method-${req.method}">${req.method}</span></td>
-                        <td>${req.path}</td>
-                        <td><span class="status-code status-${Math.floor(req.status / 100)}xx">${req.status}</span></td>
-                        <td>${fmtSize(req.response_size || 0)}</td>
-                        <td>${fmtDuration(req.duration_ms || 0)}</td>
-                        <td style="color:var(--text-secondary)">${fmtTime(req.timestamp)}</td>
-                    </tr>
-                    `;
-    }).join('')}
-            </tbody>
-        </table>
-    </div>`;
-    container.innerHTML = tableHtml;
-}
+    const wrapper = document.createElement('div');
+    wrapper.className = 'table-responsive';
 
-// SSE Setup
+    const table = document.createElement('table');
+    table.className = 'data-table';
+
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    ['Method', 'Path', 'Status', 'Size', 'Duration', 'Time'].forEach(label => {
+        const th = document.createElement('th');
+        th.textContent = label;
+        headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+
+    const tbody = document.createElement('tbody');
+    state.requests.forEach(req => {
+        tbody.appendChild(renderRequestRow(req));
+    });
+
+    table.append(thead, tbody);
+    wrapper.appendChild(table);
+    container.replaceChildren(wrapper);
+}
 function setupSSE() {
-    const evtSource = new EventSource("/api/v1/events");
+    const evtSource = new EventSource(apiEventSourceUrl());
 
     evtSource.onmessage = (event) => {
         try {
@@ -339,9 +419,8 @@ function setupSSE() {
                 state.requests.unshift(data.payload);
                 if (state.requests.length > state.maxRequests) state.requests.pop();
 
-                // Update metrics
                 state.metrics.requests++;
-                recordRequest(); // Track for live traffic chart
+                recordRequest();
                 if (data.payload.status >= 400) {
                     state.metrics.errorRate = (state.metrics.errorRate * 9 + 100) / 10;
                 } else {
@@ -349,7 +428,6 @@ function setupSSE() {
                 }
 
                 renderStats();
-                // Update both lists
                 els.requestTableBody.prepend(renderRequestRow(data.payload));
                 renderAllRequests();
 
@@ -360,8 +438,6 @@ function setupSSE() {
         } catch (e) { console.error("SSE Parse Error", e); }
     };
 }
-
-// Replay
 async function replayRequest() {
     if (!state.selectedRequestId) return;
     const req = state.requests.find(r => r.id === state.selectedRequestId);
@@ -373,11 +449,16 @@ async function replayRequest() {
         els.btnReplay.disabled = true;
         els.btnReplay.textContent = 'Replaying...';
 
-        const res = await fetch(`/api/v1/requests/${state.selectedRequestId}/replay`, {
+        const res = await dashboardFetch(`/api/v1/requests/${state.selectedRequestId}/replay`, {
             method: 'POST'
         });
 
-        const data = await res.json();
+        let data = {};
+        try {
+            data = await res.json();
+        } catch {
+            data = {};
+        }
 
         if (!res.ok) {
             throw new Error(data.error || 'Replay failed');
@@ -395,8 +476,9 @@ async function replayRequest() {
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
     initChart();
-    fetchInitialData();
-    setupSSE();
+    fetchInitialData().then((loaded) => {
+        if (loaded) setupSSE();
+    });
 
     // Sidebar Navigation
     document.querySelectorAll('.nav-links a').forEach(link => {

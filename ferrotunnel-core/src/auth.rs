@@ -7,13 +7,20 @@ use subtle::ConstantTimeEq;
 /// Returns true if slices are equal, false otherwise
 ///
 /// This prevents timing attacks where an attacker could determine
-/// how many bytes match based on comparison time.
+/// how many bytes match based on comparison time. The comparison runs
+/// over `max(a.len(), b.len())` bytes and folds the length check into the
+/// result, so it does not short-circuit on a length mismatch and therefore
+/// does not leak the expected length through timing.
 #[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+    let max_len = a.len().max(b.len());
+    let mut matches = a.len().ct_eq(&b.len());
+    for index in 0..max_len {
+        let left = a.get(index).copied().unwrap_or(0);
+        let right = b.get(index).copied().unwrap_or(0);
+        matches &= left.ct_eq(&right);
     }
-    a.ct_eq(b).into()
+    matches.into()
 }
 
 /// Hash a token using SHA-256
