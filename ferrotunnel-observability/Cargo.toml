@@ -56,6 +56,9 @@ reqwest = { version = "0.13.1", features = ["json"] }
 rust-embed = { version = "8.5", optional = true }
 mime_guess = { version = "2.0", optional = true }
 
+# Constant-time token comparison for dashboard auth
+subtle = { version = "2", optional = true }
+
 # Using custom lints to allow unwrap in metrics initialization
 [lints.rust]
 unsafe_code = "forbid"
@@ -98,4 +101,5 @@ dashboard = [
     "dep:tokio-stream",
     "dep:rust-embed",
     "dep:mime_guess",
+    "dep:subtle",
 ]

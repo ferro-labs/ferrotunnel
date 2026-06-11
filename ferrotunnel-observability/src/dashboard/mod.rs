@@ -42,6 +42,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use subtle::ConstantTimeEq;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 const DASHBOARD_AUTH_HEADER: &str = "x-dashboard-token";
@@ -126,7 +127,17 @@ pub fn create_router(
         .nest("/api/v1", api_routes)
         .fallback(static_handler)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        // Record only method + path in the request span. The dashboard auth
+        // token can be supplied as a `?token=` query parameter (EventSource
+        // cannot send headers), so the query string must never reach tracing
+        // spans, which may be exported to external log sinks.
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+            tracing::info_span!(
+                "http_request",
+                method = %request.method(),
+                path = request.uri().path(),
+            )
+        }))
 }
 
 async fn dashboard_auth_middleware(
@@ -237,17 +248,20 @@ const fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Constant-time token comparison backed by the audited `subtle` crate.
+///
+/// Runs over `max(left.len(), right.len())` bytes and folds the length check
+/// into the result, so it neither short-circuits on a length mismatch nor
+/// relies on the optimizer preserving a hand-rolled data-dependent loop.
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let max_len = left.len().max(right.len());
-    let mut diff = left.len() ^ right.len();
-
+    let mut matches = left.len().ct_eq(&right.len());
     for index in 0..max_len {
         let left_byte = left.get(index).copied().unwrap_or(0);
         let right_byte = right.get(index).copied().unwrap_or(0);
-        diff |= usize::from(left_byte ^ right_byte);
+        matches &= left_byte.ct_eq(&right_byte);
     }
-
-    diff == 0
+    matches.into()
 }
 
 /// Configuration for the dashboard server.
@@ -322,5 +336,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
+    async fn api_auth_accepts_query_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let response = reqwest::get(format!("{base_url}/api/v1/health?token=secret-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
+    async fn api_auth_accepts_cookie_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{base_url}/api/v1/health"))
+            .header(
+                header::COOKIE,
+                format!("{DASHBOARD_AUTH_COOKIE}=secret-token"),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
+    async fn api_auth_rejects_wrong_query_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let response = reqwest::get(format!("{base_url}/api/v1/health?token=wrong-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
     }
 }

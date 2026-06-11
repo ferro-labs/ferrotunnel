@@ -219,18 +219,14 @@ pub async fn connect(addr: &str, config: &TlsTransportConfig) -> io::Result<Boxe
     let tcp_stream = TcpStream::connect(addr).await?;
     configure_socket_silent(&tcp_stream);
 
-    let server_name = if configured_server_name {
-        ServerName::try_from(server_name).map_err(|e| {
-            io::Error::new(ErrorKind::InvalidInput, format!("invalid server name: {e}"))
-        })?
-    } else {
-        ServerName::try_from(server_name).map_err(|e| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                format!("invalid host in address '{}': {}", addr, e),
-            )
-        })?
-    };
+    let server_name = ServerName::try_from(server_name).map_err(|e| {
+        let message = if configured_server_name {
+            format!("invalid server name: {e}")
+        } else {
+            format!("invalid host in address '{addr}': {e}")
+        };
+        io::Error::new(ErrorKind::InvalidInput, message)
+    })?;
 
     let tls_stream = connector.connect(server_name, tcp_stream).await?;
     Ok(Box::pin(tls_stream))

@@ -99,7 +99,7 @@ pub struct ServerArgs {
 /// `--token-file`, or the interactive TTY prompt instead.
 fn resolve_token(args: &ServerArgs) -> Result<String> {
     if let Ok(t) = std::env::var("FERROTUNNEL_TOKEN") {
-        return Ok(t);
+        return Ok(t.trim_end_matches(['\r', '\n']).to_owned());
     }
     if let Some(ref path) = args.token_file {
         return read_token_file(path);

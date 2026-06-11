@@ -3,17 +3,18 @@ use crate::resource_limits::{ServerResourceLimits, SessionPermit};
 use crate::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
-use crate::tunnel::common::clamp_u128_to_u64;
+use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
 use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
 use ferrotunnel_protocol::frame::{Frame, HandshakeFrame, HandshakeStatus};
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{SinkExt, StreamExt};
 use kanal::bounded_async;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+#[cfg(feature = "quic")]
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
@@ -345,27 +346,6 @@ impl TunnelServer {
         sessions.remove(&session_id);
         Ok(())
     }
-}
-
-async fn read_initial_handshake_frame<S>(
-    framed: &mut S,
-    handshake_timeout: Duration,
-    context: &str,
-) -> Result<Frame>
-where
-    S: Stream<Item = std::io::Result<Frame>> + Unpin,
-{
-    let result = timeout(handshake_timeout, framed.next())
-        .await
-        .map_err(|_| {
-            TunnelError::Timeout(format!(
-                "{context} handshake timed out after {handshake_timeout:?}"
-            ))
-        })?;
-
-    result
-        .ok_or_else(|| TunnelError::Connection(format!("{context} handshake stream closed")))?
-        .map_err(TunnelError::Io)
 }
 
 #[cfg(feature = "quic")]
