@@ -193,20 +193,26 @@ impl TunnelServer {
                     accept_backoff.reset();
                     connection
                 }
-                Err(e) if is_transient_accept_error(&e) => {
+                // `transport::accept` performs the per-connection TLS handshake,
+                // so an error here is almost always a single bad/half-open
+                // connection (e.g. a plain-TCP health probe against a TLS
+                // listener), not a broken listener. Never terminate the accept
+                // loop; log (rate-limited) and back off so a persistent error
+                // (failing acceptor, EMFILE) cannot busy-spin a core.
+                Err(e) => {
                     let (delay, should_log) = accept_backoff.record_failure();
                     if should_log {
                         warn!(
                             bind_addr = %self.addr,
                             error = %e,
+                            transient = is_transient_accept_error(&e),
                             backoff_ms = delay.as_millis(),
-                            "Transient accept error; backing off"
+                            "Accept error; backing off"
                         );
                     }
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                Err(e) => return Err(e.into()),
             };
 
             let session_permit = match self.resource_limits.try_acquire_session() {
@@ -470,20 +476,24 @@ impl TunnelServer {
                     accept_backoff.reset();
                     accepted
                 }
-                Err(e) if is_transient_accept_error(&e) => {
+                // QUIC acceptance includes the per-connection handshake, so an
+                // error is almost always one bad connection, not a dead
+                // endpoint. Never terminate the loop; log (rate-limited) and
+                // back off so a persistent failure cannot busy-spin a core.
+                Err(e) => {
                     let (delay, should_log) = accept_backoff.record_failure();
                     if should_log {
                         warn!(
                             bind_addr = %quic_addr,
                             error = %e,
+                            transient = is_transient_accept_error(&e),
                             backoff_ms = delay.as_millis(),
-                            "Transient QUIC accept error; backing off"
+                            "QUIC accept error; backing off"
                         );
                     }
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                Err(e) => return Err(e.into()),
             };
 
             let session_permit = match self.resource_limits.try_acquire_session() {
