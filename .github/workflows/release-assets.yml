@@ -169,4 +169,7 @@ jobs:
           files: artifacts/**/*
           draft: true
           prerelease: true
-          generate_release_notes: false
+          # Keep the changelog excerpt (body_path) AND append GitHub's
+          # auto-generated "What's Changed" / "New Contributors" section so
+          # contributor @handles are credited on every release.
+          generate_release_notes: true
