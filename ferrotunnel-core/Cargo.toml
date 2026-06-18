@@ -56,6 +56,10 @@ quinn = { workspace = true, optional = true }
 # Optional metrics (decode/encode latency, queue depth)
 ferrotunnel-observability = { version = "1.1.0", path = "../ferrotunnel-observability", optional = true }
 
+# File descriptor exhaustion (EMFILE/ENFILE) detection in accept-loop backoff
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 quic = ["dep:quinn"]

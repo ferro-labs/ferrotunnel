@@ -3,6 +3,7 @@ use crate::resource_limits::{ServerResourceLimits, SessionPermit};
 use crate::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
+use crate::tunnel::accept_backoff::{is_transient_accept_error, AcceptBackoff};
 use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
 use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
 use ferrotunnel_common::{Result, TunnelError};
@@ -17,7 +18,7 @@ use tokio::net::TcpListener;
 #[cfg(feature = "quic")]
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(feature = "quic")]
@@ -149,39 +150,56 @@ impl TunnelServer {
             }
         });
 
+        // Back off on persistent accept errors (e.g. a failing TLS acceptor or
+        // `EMFILE`) so the loop does not busy-spin at 100% CPU and flood logs.
+        let mut accept_backoff = AcceptBackoff::default();
         loop {
-            match transport::accept(&self.transport_config, &listener).await {
-                Ok((stream, addr)) => {
-                    let session_permit = match self.resource_limits.try_acquire_session() {
-                        Ok(permit) => permit,
-                        Err(e) => {
-                            warn!("Rejecting connection from {}: {}", addr, e);
-                            continue;
-                        }
-                    };
-
-                    let sessions = sessions.clone();
-                    let token = self.auth_token.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(
-                            stream,
-                            addr,
-                            sessions,
-                            token,
-                            session_permit,
-                            handshake_timeout,
-                        )
-                        .await
-                        {
-                            warn!("Connection error for {}: {}", addr, e);
-                        }
-                    });
+            let (stream, addr) = match transport::accept(&self.transport_config, &listener).await {
+                Ok(connection) => {
+                    accept_backoff.reset();
+                    connection
                 }
+                Err(e) if is_transient_accept_error(&e) => {
+                    let (delay, should_log) = accept_backoff.record_failure();
+                    if should_log {
+                        warn!(
+                            bind_addr = %self.addr,
+                            error = %e,
+                            backoff_ms = delay.as_millis(),
+                            "Transient accept error; backing off"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let session_permit = match self.resource_limits.try_acquire_session() {
+                Ok(permit) => permit,
                 Err(e) => {
-                    error!("Accept error: {}", e);
+                    warn!("Rejecting connection from {}: {}", addr, e);
+                    continue;
                 }
-            }
+            };
+
+            let sessions = sessions.clone();
+            let token = self.auth_token.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_connection(
+                    stream,
+                    addr,
+                    sessions,
+                    token,
+                    session_permit,
+                    handshake_timeout,
+                )
+                .await
+                {
+                    warn!("Connection error for {}: {}", addr, e);
+                }
+            });
         }
     }
 
@@ -384,39 +402,56 @@ impl TunnelServer {
             }
         });
 
+        // Back off on persistent accept errors so the loop does not busy-spin
+        // at 100% CPU and flood logs (e.g. `EMFILE` while fds stay exhausted).
+        let mut accept_backoff = AcceptBackoff::default();
         loop {
-            match quic::accept(&endpoint).await {
-                Ok((connection, addr)) => {
-                    let session_permit = match self.resource_limits.try_acquire_session() {
-                        Ok(permit) => permit,
-                        Err(e) => {
-                            warn!("Rejecting QUIC connection from {}: {}", addr, e);
-                            continue;
-                        }
-                    };
-
-                    let sessions = sessions.clone();
-                    let token = self.auth_token.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_quic_connection(
-                            connection,
-                            addr,
-                            sessions,
-                            token,
-                            session_permit,
-                            handshake_timeout,
-                        )
-                        .await
-                        {
-                            warn!("QUIC connection error for {}: {}", addr, e);
-                        }
-                    });
+            let (connection, addr) = match quic::accept(&endpoint).await {
+                Ok(accepted) => {
+                    accept_backoff.reset();
+                    accepted
                 }
+                Err(e) if is_transient_accept_error(&e) => {
+                    let (delay, should_log) = accept_backoff.record_failure();
+                    if should_log {
+                        warn!(
+                            bind_addr = %quic_addr,
+                            error = %e,
+                            backoff_ms = delay.as_millis(),
+                            "Transient QUIC accept error; backing off"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let session_permit = match self.resource_limits.try_acquire_session() {
+                Ok(permit) => permit,
                 Err(e) => {
-                    error!("QUIC accept error: {}", e);
+                    warn!("Rejecting QUIC connection from {}: {}", addr, e);
+                    continue;
                 }
-            }
+            };
+
+            let sessions = sessions.clone();
+            let token = self.auth_token.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_quic_connection(
+                    connection,
+                    addr,
+                    sessions,
+                    token,
+                    session_permit,
+                    handshake_timeout,
+                )
+                .await
+                {
+                    warn!("QUIC connection error for {}: {}", addr, e);
+                }
+            });
         }
     }
 
