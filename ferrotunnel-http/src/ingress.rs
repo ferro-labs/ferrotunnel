@@ -1,4 +1,4 @@
-use crate::accept_errors::is_transient_accept_error;
+use crate::accept_errors::{is_transient_accept_error, AcceptBackoff};
 use ferrotunnel_common::Result;
 use ferrotunnel_core::tunnel::session::SessionStoreBackend;
 use ferrotunnel_plugin::{PluginAction, PluginRegistry, RequestContext, ResponseContext};
@@ -92,15 +92,24 @@ impl HttpIngress {
             self.addr
         );
 
+        let mut accept_backoff = AcceptBackoff::default();
         loop {
             let (stream, peer_addr) = match listener.accept().await {
-                Ok(connection) => connection,
+                Ok(connection) => {
+                    accept_backoff.reset();
+                    connection
+                }
                 Err(error) if is_transient_accept_error(&error) => {
-                    warn!(
-                        bind_addr = %self.addr,
-                        error = %error,
-                        "Transient HTTP ingress accept error; continuing"
-                    );
+                    let (delay, should_log) = accept_backoff.record_failure();
+                    if should_log {
+                        warn!(
+                            bind_addr = %self.addr,
+                            error = %error,
+                            backoff_ms = delay.as_millis(),
+                            "Transient HTTP ingress accept error; backing off"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 Err(error) => return Err(error.into()),
