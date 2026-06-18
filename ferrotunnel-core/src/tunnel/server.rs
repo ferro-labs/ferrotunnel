@@ -28,6 +28,9 @@ use crate::transport::quic;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Interval between periodic stale-session cleanup passes.
+const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct TunnelServer {
     addr: SocketAddr,
     auth_token: String,
@@ -36,6 +39,22 @@ pub struct TunnelServer {
     handshake_timeout: Duration,
     resource_limits: ServerResourceLimits,
     transport_config: TransportConfig,
+    /// Handle to the periodic session-cleanup task.
+    ///
+    /// Stored so the task can be aborted on shutdown (see the `Drop` impl) and
+    /// guarded so exactly one cleanup loop runs per server instance even if both
+    /// `run` and `run_quic` are invoked.
+    cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for TunnelServer {
+    fn drop(&mut self) {
+        // Abort the cleanup loop so it stops ticking and releases its `Arc`
+        // clone of the session store once the server is shut down.
+        if let Some(handle) = self.cleanup_handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl TunnelServer {
@@ -48,6 +67,7 @@ impl TunnelServer {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             resource_limits: ServerResourceLimits::default(),
             transport_config: TransportConfig::default(),
+            cleanup_handle: None,
         }
     }
 
@@ -129,18 +149,21 @@ impl TunnelServer {
         self.sessions.clone()
     }
 
-    pub async fn run(self) -> Result<()> {
-        let listener = TcpListener::bind(self.addr).await?;
-        info!("Server listening on {}", self.addr);
+    /// Start the periodic stale-session cleanup task exactly once.
+    ///
+    /// The `JoinHandle` is stored on the server so the loop can be aborted when
+    /// the server is dropped. If a task is already running this is a no-op,
+    /// guaranteeing a single cleanup loop per server instance even when both
+    /// `run` and `run_quic` are called.
+    fn start_cleanup_task(&mut self) {
+        if self.cleanup_handle.is_some() {
+            return;
+        }
 
-        let sessions = self.sessions.clone();
+        let cleanup_sessions = self.sessions.clone();
         let timeout = self.session_timeout;
-        let handshake_timeout = self.handshake_timeout;
-
-        // Spawn session cleanup task
-        let cleanup_sessions = sessions.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SESSION_CLEANUP_INTERVAL);
             loop {
                 interval.tick().await;
                 let count = cleanup_sessions.cleanup_stale_sessions(timeout);
@@ -149,6 +172,17 @@ impl TunnelServer {
                 }
             }
         });
+        self.cleanup_handle = Some(handle);
+    }
+
+    pub async fn run(mut self) -> Result<()> {
+        let listener = TcpListener::bind(self.addr).await?;
+        info!("Server listening on {}", self.addr);
+
+        self.start_cleanup_task();
+
+        let sessions = self.sessions.clone();
+        let handshake_timeout = self.handshake_timeout;
 
         // Back off on persistent accept errors (e.g. a failing TLS acceptor or
         // `EMFILE`) so the loop does not busy-spin at 100% CPU and flood logs.
@@ -372,7 +406,7 @@ impl TunnelServer {
     ///
     /// This is separate from `run()` which uses TCP. Both can run simultaneously
     /// on different ports.
-    pub async fn run_quic(self, quic_addr: SocketAddr) -> Result<()> {
+    pub async fn run_quic(mut self, quic_addr: SocketAddr) -> Result<()> {
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
@@ -385,22 +419,10 @@ impl TunnelServer {
         let endpoint = quic::create_server_endpoint(&quic_config, quic_addr)?;
         info!("QUIC server listening on {}", quic_addr);
 
-        let sessions = self.sessions.clone();
-        let timeout = self.session_timeout;
-        let handshake_timeout = self.handshake_timeout;
+        self.start_cleanup_task();
 
-        // Spawn session cleanup task
-        let cleanup_sessions = sessions.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                let count = cleanup_sessions.cleanup_stale_sessions(timeout);
-                if count > 0 {
-                    info!("Cleaned up {} stale sessions", count);
-                }
-            }
-        });
+        let sessions = self.sessions.clone();
+        let handshake_timeout = self.handshake_timeout;
 
         // Back off on persistent accept errors so the loop does not busy-spin
         // at 100% CPU and flood logs (e.g. `EMFILE` while fds stay exhausted).
@@ -779,5 +801,57 @@ mod tests {
             TunnelError::Timeout(msg) if msg.contains("server handshake timed out")
         ));
         assert_eq!(limits.available_sessions(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_spawns_only_once() {
+        let mut server = TunnelServer::new("127.0.0.1:0".parse().unwrap(), "token".to_string());
+        assert!(server.cleanup_handle.is_none());
+
+        server.start_cleanup_task();
+        let first_id = server
+            .cleanup_handle
+            .as_ref()
+            .expect("cleanup task should be spawned")
+            .id();
+
+        // A second call (e.g. if both run() and run_quic() execute) must not
+        // spawn a competing cleanup loop.
+        server.start_cleanup_task();
+        let second_id = server
+            .cleanup_handle
+            .as_ref()
+            .expect("cleanup task should still be present")
+            .id();
+
+        assert_eq!(first_id, second_id, "a second cleanup loop was spawned");
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_aborted_when_server_dropped() {
+        let mut server = TunnelServer::new("127.0.0.1:0".parse().unwrap(), "token".to_string());
+        server.start_cleanup_task();
+
+        let abort = server
+            .cleanup_handle
+            .as_ref()
+            .expect("cleanup task should be spawned")
+            .abort_handle();
+        assert!(!abort.is_finished());
+
+        // Dropping the server simulates shutdown; the cleanup task must stop.
+        drop(server);
+
+        // The abort is processed asynchronously; poll until the task stops.
+        for _ in 0..100 {
+            if abort.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            abort.is_finished(),
+            "cleanup task should be aborted after server drop"
+        );
     }
 }
