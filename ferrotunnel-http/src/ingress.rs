@@ -1,3 +1,4 @@
+use crate::accept_errors::is_transient_accept_error;
 use ferrotunnel_common::Result;
 use ferrotunnel_core::tunnel::session::SessionStoreBackend;
 use ferrotunnel_plugin::{PluginAction, PluginRegistry, RequestContext, ResponseContext};
@@ -92,7 +93,18 @@ impl HttpIngress {
         );
 
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let (stream, peer_addr) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) if is_transient_accept_error(&error) => {
+                    warn!(
+                        bind_addr = %self.addr,
+                        error = %error,
+                        "Transient HTTP ingress accept error; continuing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
 
             // Acquire connection permit (limit concurrent connections)
             let Ok(permit) = self.connection_semaphore.clone().try_acquire_owned() else {
