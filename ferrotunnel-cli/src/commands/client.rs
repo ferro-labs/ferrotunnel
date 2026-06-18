@@ -71,6 +71,29 @@ pub struct DashboardConfig {
     )]
     pub port: u16,
 
+    /// Dashboard bind address. Defaults to loopback; non-loopback requires --dashboard-allow-non-loopback.
+    #[arg(
+        long = "dashboard-bind",
+        default_value = "127.0.0.1",
+        env = "FERROTUNNEL_DASHBOARD_BIND"
+    )]
+    pub bind: std::net::IpAddr,
+
+    /// Allow dashboard to bind to a non-loopback address.
+    #[arg(
+        long = "dashboard-allow-non-loopback",
+        env = "FERROTUNNEL_DASHBOARD_ALLOW_NON_LOOPBACK"
+    )]
+    pub allow_non_loopback: bool,
+
+    /// Token required for dashboard API requests.
+    #[arg(
+        long = "dashboard-auth-token",
+        env = "FERROTUNNEL_DASHBOARD_AUTH_TOKEN",
+        hide_env_values = true
+    )]
+    pub auth_token: Option<String>,
+
     /// Disable dashboard
     #[arg(long = "no-dashboard")]
     pub disabled: bool,
@@ -79,11 +102,11 @@ pub struct DashboardConfig {
 /// TLS configuration for secure server connections (flattened into ClientFeatureArgs)
 #[derive(Args, Debug)]
 pub struct TlsConfig {
-    /// Enable TLS for server connection
+    /// Enable TLS for server connection. Requires --tls-ca unless --tls-skip-verify is set.
     #[arg(long = "tls", env = "FERROTUNNEL_TLS")]
     pub enabled: bool,
 
-    /// Skip TLS certificate verification (insecure, for self-signed certs)
+    /// Skip TLS certificate verification. This is insecure and must be explicit.
     #[arg(long = "tls-skip-verify", env = "FERROTUNNEL_TLS_SKIP_VERIFY")]
     pub skip_verify: bool,
 }
@@ -125,7 +148,7 @@ pub struct ClientArgs {
     #[command(flatten)]
     pub features: ClientFeatureArgs,
 
-    /// Path to CA certificate for TLS verification
+    /// Path to CA certificate for TLS verification. Required with --tls unless --tls-skip-verify is set.
     #[arg(long, env = "FERROTUNNEL_TLS_CA")]
     tls_ca: Option<std::path::PathBuf>,
 
@@ -183,6 +206,7 @@ pub async fn run(args: ClientArgs) -> Result<()> {
     info!("Starting FerroTunnel Client v{}", env!("CARGO_PKG_VERSION"));
 
     let token = resolve_token(&args)?;
+    validate_tls_args(&args)?;
 
     // Determine tunnel ID for routing
     let tunnel_id_string: Option<String> = args.tunnel_id.clone().or_else(|| {
@@ -199,7 +223,7 @@ pub async fn run(args: ClientArgs) -> Result<()> {
 
     // Start Dashboard and configure proxy
     let proxy: Arc<dyn StreamHandler> = if let Some(tunnel_id) = dashboard_tunnel_id {
-        setup_dashboard(&args, tunnel_id).await
+        setup_dashboard(&args, tunnel_id).await?
     } else {
         Arc::new(ferrotunnel_http::HttpProxy::new(args.local_addr.clone()))
     };
@@ -318,17 +342,39 @@ pub async fn run(args: ClientArgs) -> Result<()> {
     Ok(())
 }
 
-async fn setup_dashboard(args: &ClientArgs, tunnel_id: uuid::Uuid) -> Arc<dyn StreamHandler> {
+async fn setup_dashboard(
+    args: &ClientArgs,
+    tunnel_id: uuid::Uuid,
+) -> Result<Arc<dyn StreamHandler>> {
     use ferrotunnel_observability::dashboard::{create_router, DashboardState, EventBroadcaster};
     use tokio::sync::RwLock;
 
     let dashboard_state = Arc::new(RwLock::new(DashboardState::new(1000)));
     let broadcaster = Arc::new(EventBroadcaster::new(100));
+    let dashboard_config = &args.features.dashboard;
+    let addr = validate_dashboard_config(dashboard_config)?;
+    let auth_token = dashboard_config
+        .auth_token
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let generated_auth_token = dashboard_config.auth_token.is_none();
+    let app = create_router(
+        dashboard_state.clone(),
+        broadcaster.clone(),
+        Some(auth_token.clone()),
+    );
 
-    let app = create_router(dashboard_state.clone(), broadcaster.clone());
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], args.features.dashboard.port));
-
-    info!("Starting Dashboard at http://{}", addr);
+    if generated_auth_token {
+        info!(
+            "Starting Dashboard at http://{}; open http://{}?token={} to authenticate",
+            addr, addr, auth_token
+        );
+    } else {
+        info!(
+            "Starting Dashboard at http://{} with API authentication enabled",
+            addr
+        );
+    }
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
@@ -365,7 +411,32 @@ async fn setup_dashboard(args: &ClientArgs, tunnel_id: uuid::Uuid) -> Arc<dyn St
         tunnel_id,
     };
 
-    Arc::new(ferrotunnel_http::HttpProxy::new(args.local_addr.clone()).with_layer(capture_layer))
+    Ok(Arc::new(
+        ferrotunnel_http::HttpProxy::new(args.local_addr.clone()).with_layer(capture_layer),
+    ))
+}
+
+fn validate_dashboard_config(config: &DashboardConfig) -> Result<std::net::SocketAddr> {
+    if matches!(config.auth_token.as_deref(), Some("")) {
+        anyhow::bail!("Dashboard auth token must not be empty");
+    }
+
+    if !config.bind.is_loopback() {
+        if !config.allow_non_loopback {
+            anyhow::bail!(
+                "Refusing to bind dashboard to non-loopback address {}; pass --dashboard-allow-non-loopback to expose it",
+                config.bind
+            );
+        }
+
+        if config.auth_token.is_none() {
+            anyhow::bail!(
+                "Dashboard auth token is required when binding to non-loopback addresses"
+            );
+        }
+    }
+
+    Ok(std::net::SocketAddr::new(config.bind, config.port))
 }
 
 #[cfg(feature = "quic")]
@@ -392,6 +463,16 @@ fn setup_quic_config(args: &ClientArgs) -> ferrotunnel_core::transport::quic::Qu
     }
 }
 
+fn validate_tls_args(args: &ClientArgs) -> Result<()> {
+    if args.features.tls.enabled && !args.features.tls.skip_verify && args.tls_ca.is_none() {
+        anyhow::bail!(
+            "TLS requires --tls-ca for certificate verification; use --tls-skip-verify only for explicit insecure mode"
+        );
+    }
+
+    Ok(())
+}
+
 fn setup_tls(mut client: TunnelClient, args: &ClientArgs) -> TunnelClient {
     if args.features.tls.enabled {
         if args.features.tls.skip_verify {
@@ -400,9 +481,6 @@ fn setup_tls(mut client: TunnelClient, args: &ClientArgs) -> TunnelClient {
         } else if let Some(ref ca_path) = args.tls_ca {
             info!("TLS enabled with CA: {:?}", ca_path);
             client = client.with_tls_ca(ca_path.clone());
-        } else {
-            info!("TLS enabled with certificate verification skipped (no CA provided)");
-            client = client.with_tls_skip_verify();
         }
 
         if let Some(ref server_name) = args.tls_server_name {
@@ -419,4 +497,145 @@ fn setup_tls(mut client: TunnelClient, args: &ClientArgs) -> TunnelClient {
         }
     }
     client
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn client_args(tls_enabled: bool, skip_verify: bool, tls_ca: Option<PathBuf>) -> ClientArgs {
+        ClientArgs {
+            server: "127.0.0.1:7835".to_string(),
+            token: Some("token".to_string()),
+            log_level: "info".to_string(),
+            local_addr: "127.0.0.1:8000".to_string(),
+            tunnel_id: None,
+            features: ClientFeatureArgs {
+                dashboard: DashboardConfig {
+                    port: 4040,
+                    bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    allow_non_loopback: false,
+                    auth_token: None,
+                    disabled: true,
+                },
+                tls: TlsConfig {
+                    enabled: tls_enabled,
+                    skip_verify,
+                },
+                telemetry: TelemetryConfig {
+                    observability: false,
+                    metrics: false,
+                },
+            },
+            tls_ca,
+            tls_server_name: None,
+            tls_cert: None,
+            tls_key: None,
+            #[cfg(feature = "quic")]
+            quic: false,
+            #[cfg(feature = "quic")]
+            quic_0rtt: false,
+        }
+    }
+
+    #[test]
+    fn dashboard_allows_loopback_by_default() {
+        let config = DashboardConfig {
+            port: 4040,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            allow_non_loopback: false,
+            auth_token: None,
+            disabled: false,
+        };
+
+        let addr = validate_dashboard_config(&config).expect("loopback bind should be allowed");
+
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn dashboard_rejects_non_loopback_without_explicit_opt_in() {
+        let config = DashboardConfig {
+            port: 4040,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            allow_non_loopback: false,
+            auth_token: None,
+            disabled: false,
+        };
+
+        let err = validate_dashboard_config(&config).expect_err("non-loopback bind must fail");
+
+        assert!(err.to_string().contains("--dashboard-allow-non-loopback"));
+    }
+
+    #[test]
+    fn dashboard_rejects_non_loopback_without_auth_token() {
+        let config = DashboardConfig {
+            port: 4040,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            allow_non_loopback: true,
+            auth_token: None,
+            disabled: false,
+        };
+
+        let err = validate_dashboard_config(&config).expect_err("exposed bind must require auth");
+
+        assert!(err.to_string().contains("auth token"));
+    }
+
+    #[test]
+    fn dashboard_allows_non_loopback_with_explicit_opt_in() {
+        let config = DashboardConfig {
+            port: 4040,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            allow_non_loopback: true,
+            auth_token: Some("secret".to_string()),
+            disabled: false,
+        };
+
+        let addr =
+            validate_dashboard_config(&config).expect("explicit opt-in should allow exposed bind");
+
+        assert!(!addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn dashboard_rejects_empty_auth_token() {
+        let config = DashboardConfig {
+            port: 4040,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            allow_non_loopback: false,
+            auth_token: Some(String::new()),
+            disabled: false,
+        };
+
+        let err = validate_dashboard_config(&config).expect_err("empty auth token must fail");
+
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn tls_without_ca_requires_explicit_insecure_mode() {
+        let args = client_args(true, false, None);
+
+        let err = validate_tls_args(&args).expect_err("TLS without CA must fail");
+
+        assert!(err.to_string().contains("--tls-ca"));
+        assert!(err.to_string().contains("--tls-skip-verify"));
+    }
+
+    #[test]
+    fn tls_allows_explicit_skip_verify_without_ca() {
+        let args = client_args(true, true, None);
+
+        validate_tls_args(&args).expect("explicit insecure mode should be allowed");
+    }
+
+    #[test]
+    fn tls_allows_ca_without_skip_verify() {
+        let args = client_args(true, false, Some(PathBuf::from("ca.crt")));
+
+        validate_tls_args(&args).expect("CA-backed TLS should be allowed");
+    }
 }

@@ -46,7 +46,7 @@ impl TlsTransportConfig {
                 .unwrap_or_default(),
             server_name: config.server_name.clone(),
             client_auth: config.client_auth,
-            skip_verify: false,
+            skip_verify: config.skip_verify,
         })
     }
 }
@@ -113,9 +113,18 @@ impl rustls::client::danger::ServerCertVerifier for InsecureServerCertVerifier {
 }
 
 pub fn create_client_config(config: &TlsTransportConfig) -> io::Result<Arc<ClientConfig>> {
+    create_client_config_with_context(config, "TLS", config.server_name.as_deref())
+}
+
+pub(crate) fn create_client_config_with_context(
+    config: &TlsTransportConfig,
+    transport: &'static str,
+    server_name: Option<&str>,
+) -> io::Result<Arc<ClientConfig>> {
     let builder = ClientConfig::builder();
 
     let builder = if config.skip_verify {
+        warn_insecure_verification(transport, server_name);
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
@@ -148,6 +157,15 @@ pub fn create_client_config(config: &TlsTransportConfig) -> io::Result<Arc<Clien
     };
 
     Ok(Arc::new(client_config))
+}
+
+fn warn_insecure_verification(transport: &'static str, server_name: Option<&str>) {
+    let server_name = server_name.unwrap_or("<runtime server name>");
+    tracing::warn!(
+        transport,
+        server_name,
+        "certificate verification is disabled; peer identity will not be authenticated"
+    );
 }
 
 pub fn create_server_config(config: &TlsTransportConfig) -> io::Result<Arc<ServerConfig>> {
@@ -190,25 +208,25 @@ pub fn create_server_config(config: &TlsTransportConfig) -> io::Result<Arc<Serve
 }
 
 pub async fn connect(addr: &str, config: &TlsTransportConfig) -> io::Result<BoxedStream> {
-    let client_config = create_client_config(config)?;
+    let configured_server_name = config.server_name.is_some();
+    let server_name = config
+        .server_name
+        .clone()
+        .unwrap_or_else(|| addr.split(':').next().unwrap_or("localhost").to_string());
+    let client_config = create_client_config_with_context(config, "TLS", Some(&server_name))?;
     let connector = TlsConnector::from(client_config);
 
     let tcp_stream = TcpStream::connect(addr).await?;
     configure_socket_silent(&tcp_stream);
 
-    let server_name = if let Some(name) = &config.server_name {
-        ServerName::try_from(name.clone()).map_err(|e| {
-            io::Error::new(ErrorKind::InvalidInput, format!("invalid server name: {e}"))
-        })?
-    } else {
-        let host = addr.split(':').next().unwrap_or("localhost");
-        ServerName::try_from(host.to_string()).map_err(|e| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                format!("invalid host in address '{}': {}", addr, e),
-            )
-        })?
-    };
+    let server_name = ServerName::try_from(server_name).map_err(|e| {
+        let message = if configured_server_name {
+            format!("invalid server name: {e}")
+        } else {
+            format!("invalid host in address '{addr}': {e}")
+        };
+        io::Error::new(ErrorKind::InvalidInput, message)
+    })?;
 
     let tls_stream = connector.connect(server_name, tcp_stream).await?;
     Ok(Box::pin(tls_stream))
@@ -221,4 +239,25 @@ pub async fn accept_tls(
     let server_config = create_server_config(config)?;
     let acceptor = TlsAcceptor::from(server_config);
     acceptor.accept(tcp_stream).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TlsTransportConfig;
+    use ferrotunnel_common::config::TlsConfig;
+
+    #[test]
+    fn from_common_preserves_skip_verify() {
+        let config = TlsConfig {
+            enabled: true,
+            skip_verify: true,
+            server_name: Some("localhost".to_string()),
+            ..Default::default()
+        };
+
+        let tls = TlsTransportConfig::from_common(&config).expect("TLS should be enabled");
+
+        assert!(tls.skip_verify);
+        assert_eq!(tls.server_name.as_deref(), Some("localhost"));
+    }
 }

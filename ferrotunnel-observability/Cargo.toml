@@ -14,7 +14,7 @@ categories = ["network-programming"]
 include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
-ferrotunnel-common = { version = "1.0.8", path = "../ferrotunnel-common" }
+ferrotunnel-common = { version = "1.1.0", path = "../ferrotunnel-common" }
 anyhow = { workspace = true }
 
 # Metrics
@@ -55,6 +55,9 @@ reqwest = { version = "0.13.1", features = ["json"] }
 
 rust-embed = { version = "8.5", optional = true }
 mime_guess = { version = "2.0", optional = true }
+
+# Constant-time token comparison for dashboard auth
+subtle = { version = "2", optional = true }
 
 # Using custom lints to allow unwrap in metrics initialization
 [lints.rust]
@@ -98,4 +101,5 @@ dashboard = [
     "dep:tokio-stream",
     "dep:rust-embed",
     "dep:mime_guess",
+    "dep:subtle",
 ]
