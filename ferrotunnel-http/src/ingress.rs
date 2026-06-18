@@ -22,6 +22,8 @@ use tracing::{error, info, warn};
 pub struct IngressConfig {
     /// Maximum concurrent connections (default: 10000)
     pub max_connections: usize,
+    /// Maximum request body size in bytes (default: 100MB)
+    pub max_request_body_size: usize,
     /// Maximum response body size in bytes (default: 100MB)
     pub max_response_size: usize,
     /// Timeout for upstream handshake (default: 10s)
@@ -36,7 +38,8 @@ impl Default for IngressConfig {
     fn default() -> Self {
         Self {
             max_connections: 10000,
-            max_response_size: 100 * 1024 * 1024, // 100MB
+            max_request_body_size: 100 * 1024 * 1024, // 100MB
+            max_response_size: 100 * 1024 * 1024,     // 100MB
             handshake_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_mins(1),
             alt_svc_header: None,
@@ -270,7 +273,20 @@ async fn handle_request(
         Protocol::HTTP
     };
 
-    let mut forward_req = Request::from_parts(parts, body.boxed());
+    // Reject oversized request bodies before forwarding upstream.
+    // A declared Content-Length over the limit is rejected up front with 413.
+    // Bodies without a Content-Length (e.g. chunked) are hard-capped by the
+    // `Limited` wrapper below so they cannot pin a permit + memory unboundedly.
+    if content_length_exceeds(&parts.headers, config.max_request_body_size) {
+        warn!("Request body exceeds max_request_body_size; rejecting with 413");
+        return Ok(full_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Request body too large",
+        ));
+    }
+
+    let limited_body = http_body_util::Limited::new(body, config.max_request_body_size).boxed();
+    let mut forward_req = Request::from_parts(parts, limited_body);
 
     // HTTP/2 (gRPC) requires an absolute URI (scheme + authority).
     // Callers often send requests with a path-only URI and a Host header;
@@ -482,11 +498,17 @@ async fn handle_request(
     }
 
     // Buffer response for plugin processing
-    let body_bytes = match collect_body_with_limit(body, config.max_response_size).await {
+    let body_bytes = match collect_body_with_limit(
+        body,
+        config.max_response_size,
+        config.response_timeout,
+    )
+    .await
+    {
         Ok(bytes) => bytes,
-        Err(msg) => {
-            error!("Response body error: {}", msg);
-            return Ok(full_response(StatusCode::BAD_GATEWAY, msg));
+        Err(err) => {
+            error!("Response body error: {}", err.message());
+            return Ok(full_response(err.status(), err.message()));
         }
     };
 
@@ -518,6 +540,18 @@ async fn handle_request(
         Response::from_parts(final_parts, boxed_body),
         &config,
     ))
+}
+
+/// Returns `true` if the request declares a `Content-Length` larger than `max_size`.
+///
+/// Used to reject oversized request bodies up front with `413 Payload Too Large`
+/// before any upstream stream is opened.
+fn content_length_exceeds(headers: &hyper::HeaderMap, max_size: usize) -> bool {
+    headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_some_and(|len| len > max_size as u64)
 }
 
 fn is_grpc(headers: &hyper::HeaderMap) -> bool {
@@ -588,24 +622,62 @@ pub(crate) fn parse_and_normalize_host(
 /// Initial reserve for response body collection to reduce reallocations.
 const BODY_COLLECT_RESERVE: usize = 64 * 1024;
 
-/// Collect response body with a size limit to prevent denial-of-service attacks
-async fn collect_body_with_limit(
-    body: hyper::body::Incoming,
+/// Reason a buffered response body could not be collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyCollectError {
+    /// A frame did not arrive within the per-frame timeout (stalled upstream).
+    Timeout,
+    /// The collected body exceeded `max_size`.
+    TooLarge,
+    /// The upstream body stream returned a read error.
+    Read,
+}
+
+impl BodyCollectError {
+    /// HTTP status to return to the downstream client for this failure.
+    fn status(self) -> StatusCode {
+        match self {
+            BodyCollectError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            BodyCollectError::TooLarge | BodyCollectError::Read => StatusCode::BAD_GATEWAY,
+        }
+    }
+
+    /// Human-readable message for the response body and logs.
+    fn message(self) -> &'static str {
+        match self {
+            BodyCollectError::Timeout => "Upstream response body timeout",
+            BodyCollectError::TooLarge => "Response body too large",
+            BodyCollectError::Read => "Error reading response body",
+        }
+    }
+}
+
+/// Collect a response body with a size limit and a per-frame read timeout.
+///
+/// The size limit prevents unbounded memory use; the per-frame timeout ensures a
+/// stalled upstream cannot pin a connection permit and buffered memory
+/// indefinitely (mirrors the HTTP/3 ingress `collect_upstream_body`).
+async fn collect_body_with_limit<B>(
+    mut body: B,
     max_size: usize,
-) -> std::result::Result<Bytes, &'static str> {
-    use http_body_util::BodyExt;
-
+    frame_timeout: Duration,
+) -> std::result::Result<Bytes, BodyCollectError>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
     let mut collected = Vec::with_capacity(BODY_COLLECT_RESERVE.min(max_size));
-    let mut body = body;
 
-    while let Some(frame_result) = body.frame().await {
-        let Ok(frame) = frame_result else {
-            return Err("Error reading response body");
+    loop {
+        let frame = match tokio::time::timeout(frame_timeout, body.frame()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(Some(Err(_))) => return Err(BodyCollectError::Read),
+            Ok(None) => break,
+            Err(_) => return Err(BodyCollectError::Timeout),
         };
 
         if let Some(data) = frame.data_ref() {
             if collected.len() + data.len() > max_size {
-                return Err("Response body too large");
+                return Err(BodyCollectError::TooLarge);
             }
             collected.extend_from_slice(data);
         }
@@ -775,5 +847,98 @@ mod tests {
     fn test_not_websocket_regular_request() {
         let headers = hyper::HeaderMap::new();
         assert!(!is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn content_length_exceeds_when_over_limit() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(hyper::header::CONTENT_LENGTH, "2048".parse().unwrap());
+        assert!(content_length_exceeds(&headers, 1024));
+    }
+
+    #[test]
+    fn content_length_within_limit_is_allowed() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(hyper::header::CONTENT_LENGTH, "512".parse().unwrap());
+        assert!(!content_length_exceeds(&headers, 1024));
+    }
+
+    #[test]
+    fn content_length_missing_is_allowed() {
+        let headers = hyper::HeaderMap::new();
+        assert!(!content_length_exceeds(&headers, 1024));
+    }
+
+    #[test]
+    fn content_length_non_numeric_is_allowed() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONTENT_LENGTH,
+            "not-a-number".parse().unwrap(),
+        );
+        assert!(!content_length_exceeds(&headers, 1024));
+    }
+
+    // Acceptance (1): an oversized request body is rejected. The `Limited`
+    // wrapper used on the forwarded request body errors once the cap is passed,
+    // hard-capping bodies that have no declared Content-Length.
+    #[tokio::test]
+    async fn oversized_request_body_is_rejected_by_limited() {
+        let body = http_body_util::Full::new(Bytes::from(vec![0u8; 2048]));
+        let limited = http_body_util::Limited::new(body, 1024);
+        let result = limited.collect().await;
+        assert!(result.is_err(), "body over the limit must be rejected");
+    }
+
+    #[tokio::test]
+    async fn within_limit_request_body_is_accepted_by_limited() {
+        let body = http_body_util::Full::new(Bytes::from(vec![0u8; 512]));
+        let limited = http_body_util::Limited::new(body, 1024);
+        let result = limited.collect().await;
+        assert!(result.is_ok(), "body within the limit must be accepted");
+    }
+
+    /// A response body that never yields a frame, used to exercise the
+    /// per-frame read timeout in `collect_body_with_limit`.
+    struct StalledBody;
+
+    impl hyper::body::Body for StalledBody {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>>
+        {
+            std::task::Poll::Pending
+        }
+    }
+
+    // Acceptance (2): a stalled upstream response body times out instead of
+    // pinning a permit + memory indefinitely, surfacing as a 504.
+    #[tokio::test]
+    async fn stalled_response_body_times_out() {
+        let result = collect_body_with_limit(StalledBody, 1024, Duration::from_millis(50)).await;
+        assert_eq!(result, Err(BodyCollectError::Timeout));
+        assert_eq!(
+            BodyCollectError::Timeout.status(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn response_body_over_limit_is_rejected() {
+        let body = http_body_util::Full::new(Bytes::from(vec![0u8; 2048]));
+        let result = collect_body_with_limit(body, 1024, Duration::from_secs(5)).await;
+        assert_eq!(result, Err(BodyCollectError::TooLarge));
+        assert_eq!(BodyCollectError::TooLarge.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn response_body_within_limit_is_collected() {
+        let body = http_body_util::Full::new(Bytes::from_static(b"hello"));
+        let result = collect_body_with_limit(body, 1024, Duration::from_secs(5)).await;
+        assert_eq!(result, Ok(Bytes::from_static(b"hello")));
     }
 }
