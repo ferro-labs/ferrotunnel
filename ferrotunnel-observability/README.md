@@ -152,7 +152,9 @@ async fn main() {
 use axum::{routing::get, Router};
 use ferrotunnel_observability::gather_metrics;
 
-let app = Router::new().route("/metrics", get(|| async { gather_metrics() }));
+let app = Router::new().route("/metrics", get(|| async {
+    gather_metrics().unwrap_or_else(|_| "failed to gather metrics\n".to_string())
+}));
 ```
 
 ## Configuration
