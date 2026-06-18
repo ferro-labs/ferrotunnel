@@ -9,7 +9,7 @@ use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
-use ferrotunnel_protocol::frame::{Frame, HandshakeFrame, HandshakeStatus};
+use ferrotunnel_protocol::frame::{CloseReason, Frame, HandshakeFrame, HandshakeStatus};
 use futures::{SinkExt, StreamExt};
 use kanal::bounded_async;
 use std::net::SocketAddr;
@@ -367,12 +367,49 @@ impl TunnelServer {
                 m.record_decode(1, bytes, decode_start.elapsed());
             }
 
-            // Update heartbeat for any activity
-            if let Some(mut session) = sessions.get_mut(&session_id) {
+            // Update heartbeat for any activity and snapshot the rate limiter.
+            let rate_limiter = if let Some(mut session) = sessions.get_mut(&session_id) {
                 session.update_heartbeat();
+                session.rate_limiter.clone()
             } else {
                 // Session removed (shutdown/timeout)
                 return Err(TunnelError::Protocol("Session not found".into()));
+            };
+
+            // Enforce per-session rate limits on the hot path (issue #119).
+            // Fail closed: deny stream opens and drop data frames when over limit.
+            if let Some(limiter) = &rate_limiter {
+                match &frame {
+                    Frame::OpenStream(open) => {
+                        if limiter.check_stream_open().is_err() {
+                            let stream_id = open.stream_id;
+                            warn!(
+                                session_id = %session_id,
+                                stream_id,
+                                "Stream-open rate limit exceeded; denying stream"
+                            );
+                            // Signal denial to the client so it does not wait indefinitely.
+                            let _ = multiplexer
+                                .send_frame(Frame::CloseStream {
+                                    stream_id,
+                                    reason: CloseReason::Error("rate limited".into()),
+                                })
+                                .await;
+                            continue;
+                        }
+                    }
+                    Frame::Data { data, .. } => {
+                        if limiter.check_data(data.len()).is_err() {
+                            warn!(
+                                session_id = %session_id,
+                                bytes = data.len(),
+                                "Data rate limit exceeded; dropping data frame"
+                            );
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             match frame {
@@ -852,6 +889,75 @@ mod tests {
         assert!(
             abort.is_finished(),
             "cleanup task should be aborted after server drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_messages_enforces_stream_open_rate_limit() {
+        use crate::rate_limit::{RateLimiterConfig, SessionRateLimiter};
+        use ferrotunnel_protocol::frame::{OpenStreamFrame, Protocol, StreamPriority};
+        use std::num::NonZeroU32;
+
+        // Duplex channel: the "client" half writes frames the server reads.
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+        // Multiplexer wired to a drained outbound channel so denial frames never block.
+        let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
+        tokio::spawn(async move { while frame_rx.recv().await.is_ok() {} });
+        let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, false);
+
+        // Session with a tight stream-open limiter: capacity = 1 (1/s, burst 1).
+        let session_id = Uuid::new_v4();
+        let tight = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(1).unwrap(),
+            bytes_per_sec: NonZeroU32::new(1000).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let sessions = SessionStoreBackend::default();
+        let session = Session::new(
+            session_id,
+            "tight-tunnel".into(),
+            "127.0.0.1:0".parse().unwrap(),
+            "tok".into(),
+            vec![],
+            Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+        )
+        .with_rate_limiter(SessionRateLimiter::new(&tight));
+        sessions.add(session).unwrap();
+
+        // Client encodes three OpenStream frames, then closes (EOF ends the loop).
+        let mut client = Framed::new(client_side, TunnelCodec::new());
+        for stream_id in [1u32, 3, 5] {
+            client
+                .send(Frame::OpenStream(Box::new(OpenStreamFrame {
+                    stream_id,
+                    protocol: Protocol::TCP,
+                    headers: vec![],
+                    body_hint: None,
+                    priority: StreamPriority::default(),
+                })))
+                .await
+                .unwrap();
+        }
+        client.flush().await.unwrap();
+        drop(client);
+
+        // Drive the production hot path.
+        let server_stream: BoxedStream = Box::pin(server_side);
+        let (read_half, _write_half) = tokio::io::split(server_stream);
+        let framed_read = tokio_util::codec::FramedRead::new(read_half, TunnelCodec::new());
+        TunnelServer::process_messages(framed_read, session_id, sessions, multiplexer)
+            .await
+            .unwrap();
+
+        // Only the first stream-open passes enforcement; the rest are denied.
+        let mut accepted = 0;
+        while new_stream_rx.try_recv().ok().flatten().is_some() {
+            accepted += 1;
+        }
+        assert_eq!(
+            accepted, 1,
+            "rate limiter must deny stream opens over limit"
         );
     }
 }

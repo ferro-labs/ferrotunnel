@@ -1,4 +1,4 @@
-use crate::rate_limit::SessionRateLimiter;
+use crate::rate_limit::{RateLimiterConfig, SessionRateLimiter};
 use crate::stream::AnyMultiplexer;
 use dashmap::DashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -47,7 +47,9 @@ impl Session {
             last_heartbeat: now,
             capabilities,
             multiplexer,
-            rate_limiter: None,
+            // Enforce per-session limits by default so the limiter is never dead code.
+            // Callers may override via [`Self::with_rate_limiter`].
+            rate_limiter: Some(SessionRateLimiter::new(&RateLimiterConfig::default())),
         }
     }
 
