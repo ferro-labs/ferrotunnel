@@ -67,6 +67,7 @@ metrics = ["dep:ferrotunnel-observability"]
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "transport"
