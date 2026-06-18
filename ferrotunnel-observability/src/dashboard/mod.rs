@@ -14,10 +14,10 @@
 //! let broadcaster = Arc::new(EventBroadcaster::new(100));
 //!
 //! // Create the router
-//! let app = create_router(state, broadcaster);
+//! let app = create_router(state, broadcaster, None);
 //!
 //! // Run the server
-//! let listener = tokio::net::TcpListener::bind("0.0.0.0:4040").await?;
+//! let listener = tokio::net::TcpListener::bind("127.0.0.1:4040").await?;
 //! axum::serve(listener, app).await?;
 //! ```
 
@@ -34,16 +34,24 @@ pub use models::{
 use std::sync::Arc;
 
 use axum::{
-    http::StatusCode,
-    response::IntoResponse,
+    body::Body,
+    extract::State,
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
-use tower_http::{
-    compression::CompressionLayer,
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
-};
+use subtle::ConstantTimeEq;
+use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+
+const DASHBOARD_AUTH_HEADER: &str = "x-dashboard-token";
+const DASHBOARD_AUTH_COOKIE: &str = "ferrotunnel_dashboard_token";
+
+#[derive(Clone)]
+struct DashboardAuth {
+    token: Arc<str>,
+}
 
 /// Creates the dashboard API router with all endpoints.
 ///
@@ -51,6 +59,7 @@ use tower_http::{
 ///
 /// * `state` - Shared dashboard state for tunnel and request data.
 /// * `broadcaster` - Event broadcaster for SSE streaming.
+/// * `auth_token` - Optional token required for all `/api/v1/*` endpoints.
 ///
 /// # Endpoints
 ///
@@ -74,18 +83,18 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
     match Assets::get(path) {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            (
-                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
-                content.data,
-            )
-                .into_response()
+            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
         }
         None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
     }
 }
 
-pub fn create_router(state: SharedDashboardState, broadcaster: Arc<EventBroadcaster>) -> Router {
-    let api_routes = Router::new()
+pub fn create_router(
+    state: SharedDashboardState,
+    broadcaster: Arc<EventBroadcaster>,
+    auth_token: Option<String>,
+) -> Router {
+    let data_routes = Router::new()
         .route("/health", get(handlers::health_handler))
         .route("/tunnels", get(handlers::list_tunnels_handler))
         .route("/tunnels/{id}", get(handlers::get_tunnel_handler))
@@ -96,21 +105,163 @@ pub fn create_router(state: SharedDashboardState, broadcaster: Arc<EventBroadcas
             post(handlers::replay_request_handler),
         )
         .route("/metrics", get(handlers::metrics_handler))
-        .with_state(state)
+        .with_state(state);
+
+    let event_routes = Router::new()
         .route("/events", get(events::events_handler))
         .with_state(broadcaster);
+
+    let api_routes = match auth_token {
+        Some(token) => data_routes
+            .merge(event_routes)
+            .layer(middleware::from_fn_with_state(
+                DashboardAuth {
+                    token: Arc::from(token),
+                },
+                dashboard_auth_middleware,
+            )),
+        None => data_routes.merge(event_routes),
+    };
 
     Router::new()
         .nest("/api/v1", api_routes)
         .fallback(static_handler)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        // Record only method + path in the request span. The dashboard auth
+        // token can be supplied as a `?token=` query parameter (EventSource
+        // cannot send headers), so the query string must never reach tracing
+        // spans, which may be exported to external log sinks.
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+            tracing::info_span!(
+                "http_request",
+                method = %request.method(),
+                path = request.uri().path(),
+            )
+        }))
+}
+
+async fn dashboard_auth_middleware(
+    State(auth): State<DashboardAuth>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let provided = request_auth_token(req.headers(), req.uri().query());
+    if let Some(provided) = provided {
+        if constant_time_eq(provided.as_bytes(), auth.token.as_bytes()) {
+            return next.run(req).await;
+        }
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        "Unauthorized",
+    )
+        .into_response()
+}
+
+fn request_auth_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {
+    bearer_token(headers)
+        .or_else(|| header_token(headers))
+        .or_else(|| cookie_token(headers))
+        .or_else(|| query_token(query))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+fn header_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(DASHBOARD_AUTH_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string)
+}
+
+fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::COOKIE)?.to_str().ok()?;
+    value.split(';').find_map(|part| {
+        let (name, token) = part.trim().split_once('=')?;
+        if name == DASHBOARD_AUTH_COOKIE {
+            Some(percent_decode(token, false))
+        } else {
+            None
+        }
+    })
+}
+
+fn query_token(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|part| {
+        let (name, token) = part.split_once('=').unwrap_or((part, ""));
+        if percent_decode(name, true) == "token" {
+            Some(percent_decode(token, true))
+        } else {
+            None
+        }
+    })
+}
+
+fn percent_decode(value: &str, plus_as_space: bool) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                if let (Some(high), Some(low)) =
+                    (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+                {
+                    decoded.push((high << 4) | low);
+                    index += 3;
+                    continue;
+                }
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+            b'+' if plus_as_space => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Constant-time token comparison backed by the audited `subtle` crate.
+///
+/// Runs over `max(left.len(), right.len())` bytes and folds the length check
+/// into the result, so it neither short-circuits on a length mismatch nor
+/// relies on the optimizer preserving a hand-rolled data-dependent loop.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max_len = left.len().max(right.len());
+    let mut matches = left.len().ct_eq(&right.len());
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        matches &= left_byte.ct_eq(&right_byte);
+    }
+    matches.into()
 }
 
 /// Configuration for the dashboard server.
@@ -131,5 +282,99 @@ impl Default for DashboardConfig {
             max_requests: 1000,
             auth_token: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::RwLock;
+
+    async fn spawn_dashboard(auth_token: Option<String>) -> String {
+        let state = Arc::new(RwLock::new(DashboardState::new(10)));
+        let broadcaster = Arc::new(EventBroadcaster::new(10));
+        let app = create_router(state, broadcaster, auth_token);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn constant_time_compare_matches_equal_tokens() {
+        assert!(constant_time_eq(b"secret-token", b"secret-token"));
+        assert!(!constant_time_eq(b"secret-token", b"secret-tokem"));
+        assert!(!constant_time_eq(b"secret-token", b"secret-token-longer"));
+    }
+
+    #[tokio::test]
+    async fn api_auth_rejects_missing_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let response = reqwest::get(format!("{base_url}/api/v1/health"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_auth_accepts_bearer_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{base_url}/api/v1/health"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
+    async fn api_auth_accepts_query_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let response = reqwest::get(format!("{base_url}/api/v1/health?token=secret-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
+    async fn api_auth_accepts_cookie_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{base_url}/api/v1/health"))
+            .header(
+                header::COOKIE,
+                format!("{DASHBOARD_AUTH_COOKIE}=secret-token"),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
+    async fn api_auth_rejects_wrong_query_token() {
+        let base_url = spawn_dashboard(Some("secret-token".to_string())).await;
+        let response = reqwest::get(format!("{base_url}/api/v1/health?token=wrong-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status().as_u16(),
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
     }
 }

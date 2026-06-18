@@ -3,7 +3,7 @@ use crate::resource_limits::{ServerResourceLimits, SessionPermit};
 use crate::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
-use crate::tunnel::common::clamp_u128_to_u64;
+use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
 use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
@@ -14,6 +14,8 @@ use kanal::bounded_async;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+#[cfg(feature = "quic")]
+use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -23,11 +25,14 @@ use crate::stream::QuicMultiplexer;
 #[cfg(feature = "quic")]
 use crate::transport::quic;
 
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct TunnelServer {
     addr: SocketAddr,
     auth_token: String,
     sessions: SessionStoreBackend,
     session_timeout: Duration,
+    handshake_timeout: Duration,
     resource_limits: ServerResourceLimits,
     transport_config: TransportConfig,
 }
@@ -39,6 +44,7 @@ impl TunnelServer {
             auth_token,
             sessions: SessionStoreBackend::default(),
             session_timeout: Duration::from_secs(90),
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             resource_limits: ServerResourceLimits::default(),
             transport_config: TransportConfig::default(),
         }
@@ -54,6 +60,12 @@ impl TunnelServer {
     #[must_use]
     pub fn with_resource_limits(mut self, limits: ServerResourceLimits) -> Self {
         self.resource_limits = limits;
+        self
+    }
+
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
         self
     }
 
@@ -122,6 +134,7 @@ impl TunnelServer {
 
         let sessions = self.sessions.clone();
         let timeout = self.session_timeout;
+        let handshake_timeout = self.handshake_timeout;
 
         // Spawn session cleanup task
         let cleanup_sessions = sessions.clone();
@@ -151,9 +164,15 @@ impl TunnelServer {
                     let token = self.auth_token.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            Self::handle_connection(stream, addr, sessions, token, session_permit)
-                                .await
+                        if let Err(e) = Self::handle_connection(
+                            stream,
+                            addr,
+                            sessions,
+                            token,
+                            session_permit,
+                            handshake_timeout,
+                        )
+                        .await
                         {
                             warn!("Connection error for {}: {}", addr, e);
                         }
@@ -173,105 +192,102 @@ impl TunnelServer {
         sessions: SessionStoreBackend,
         expected_token: String,
         _session_permit: SessionPermit,
+        handshake_timeout: Duration,
     ) -> Result<()> {
         let mut framed = Framed::new(stream, TunnelCodec::new());
 
         // 1. Handshake
-        if let Some(result) = framed.next().await {
-            let frame = result?;
-            match frame {
-                Frame::Handshake(handshake) => {
-                    let auth = match authenticate_handshake(*handshake, &expected_token, addr) {
-                        Ok(auth) => auth,
-                        Err(status) => {
-                            framed
-                                .send(Frame::HandshakeAck {
-                                    status,
-                                    session_id: Uuid::nil(),
-                                    version: 0,
-                                    server_capabilities: vec![],
-                                })
-                                .await?;
-                            return Ok(());
-                        }
-                    };
-
-                    let AuthenticatedHandshake {
-                        session_id,
-                        tunnel_id,
-                        negotiated_version,
-                        token,
-                        capabilities,
-                    } = auth;
-
-                    // Setup multiplexer with kanal channels
-                    let parts = framed.into_parts();
-                    let (read_half, write_half) = tokio::io::split(parts.io);
-
-                    // Reconstruct FramedRead for reading, preserving any buffered data.
-                    // Dropping read_buf causes decoder desync ("Frame too large: 2021161080").
-                    let mut stream = tokio_util::codec::FramedRead::new(read_half, parts.codec);
-                    if !parts.read_buf.is_empty() {
-                        stream.read_buffer_mut().extend_from_slice(&parts.read_buf);
-                    }
-
-                    let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
-
-                    // Spawn batched sender task for vectored I/O performance
-                    tokio::spawn(run_batched_sender(frame_rx, write_half, parts.codec));
-
-                    let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, false);
-
-                    // Log unexpected streams from client (for now)
-                    tokio::spawn(async move {
-                        while let Ok(_stream) = new_stream_rx.recv().await {
-                            warn!("Client tried to open stream (not supported in MVP)");
-                        }
-                    });
-
-                    let session = Session::new(
-                        session_id,
-                        tunnel_id.clone(),
-                        addr,
-                        token,
-                        capabilities,
-                        Some(AnyMultiplexer::Tcp(multiplexer.clone())),
-                    );
-
-                    if let Err(e) = sessions.add(session) {
-                        warn!("Failed to register session: {}", e);
-                        multiplexer
-                            .send_frame(Frame::HandshakeAck {
-                                status: HandshakeStatus::TunnelIdTaken,
-                                session_id,
+        let frame = read_initial_handshake_frame(&mut framed, handshake_timeout, "server").await?;
+        match frame {
+            Frame::Handshake(handshake) => {
+                let auth = match authenticate_handshake(*handshake, &expected_token, addr) {
+                    Ok(auth) => auth,
+                    Err(status) => {
+                        framed
+                            .send(Frame::HandshakeAck {
+                                status,
+                                session_id: Uuid::nil(),
                                 version: 0,
                                 server_capabilities: vec![],
                             })
                             .await?;
-                        return Err(TunnelError::Protocol(format!(
-                            "Tunnel ID '{tunnel_id}' already in use"
-                        )));
+                        return Ok(());
                     }
+                };
 
-                    info!("Session established: {}", session_id);
+                let AuthenticatedHandshake {
+                    session_id,
+                    tunnel_id,
+                    negotiated_version,
+                    token,
+                    capabilities,
+                } = auth;
+
+                // Setup multiplexer with kanal channels
+                let parts = framed.into_parts();
+                let (read_half, write_half) = tokio::io::split(parts.io);
+
+                // Reconstruct FramedRead for reading, preserving any buffered data.
+                // Dropping read_buf causes decoder desync ("Frame too large: 2021161080").
+                let mut stream = tokio_util::codec::FramedRead::new(read_half, parts.codec);
+                if !parts.read_buf.is_empty() {
+                    stream.read_buffer_mut().extend_from_slice(&parts.read_buf);
+                }
+
+                let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
+
+                // Spawn batched sender task for vectored I/O performance
+                tokio::spawn(run_batched_sender(frame_rx, write_half, parts.codec));
+
+                let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, false);
+
+                // Log unexpected streams from client (for now)
+                tokio::spawn(async move {
+                    while let Ok(_stream) = new_stream_rx.recv().await {
+                        warn!("Client tried to open stream (not supported in MVP)");
+                    }
+                });
+
+                let session = Session::new(
+                    session_id,
+                    tunnel_id.clone(),
+                    addr,
+                    token,
+                    capabilities,
+                    Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+                );
+
+                if let Err(e) = sessions.add(session) {
+                    warn!("Failed to register session: {}", e);
                     multiplexer
                         .send_frame(Frame::HandshakeAck {
-                            status: HandshakeStatus::Success,
+                            status: HandshakeStatus::TunnelIdTaken,
                             session_id,
-                            version: negotiated_version,
-                            server_capabilities: vec!["basic".to_string()],
+                            version: 0,
+                            server_capabilities: vec![],
                         })
                         .await?;
+                    return Err(TunnelError::Protocol(format!(
+                        "Tunnel ID '{tunnel_id}' already in use"
+                    )));
+                }
 
-                    // Enter message loop
-                    Self::process_messages(stream, session_id, sessions, multiplexer).await?;
-                }
-                _ => {
-                    return Err(TunnelError::Protocol("Expected handshake".into()));
-                }
+                info!("Session established: {}", session_id);
+                multiplexer
+                    .send_frame(Frame::HandshakeAck {
+                        status: HandshakeStatus::Success,
+                        session_id,
+                        version: negotiated_version,
+                        server_capabilities: vec!["basic".to_string()],
+                    })
+                    .await?;
+
+                // Enter message loop
+                Self::process_messages(stream, session_id, sessions, multiplexer).await?;
             }
-        } else {
-            return Err(TunnelError::Connection("Connection closed".into()));
+            _ => {
+                return Err(TunnelError::Protocol("Expected handshake".into()));
+            }
         }
 
         Ok(())
@@ -353,6 +369,7 @@ impl TunnelServer {
 
         let sessions = self.sessions.clone();
         let timeout = self.session_timeout;
+        let handshake_timeout = self.handshake_timeout;
 
         // Spawn session cleanup task
         let cleanup_sessions = sessions.clone();
@@ -388,6 +405,7 @@ impl TunnelServer {
                             sessions,
                             token,
                             session_permit,
+                            handshake_timeout,
                         )
                         .await
                         {
@@ -413,12 +431,24 @@ impl TunnelServer {
         sessions: SessionStoreBackend,
         expected_token: String,
         _session_permit: SessionPermit,
+        handshake_timeout: Duration,
     ) -> Result<()> {
         // Accept the control stream (first bidi stream opened by client)
-        let (ctrl_send, ctrl_recv) = connection
-            .accept_bi()
-            .await
-            .map_err(|e| TunnelError::Connection(format!("QUIC control stream accept: {e}")))?;
+        let (ctrl_send, ctrl_recv) = match timeout(handshake_timeout, connection.accept_bi()).await
+        {
+            Ok(Ok(streams)) => streams,
+            Ok(Err(e)) => {
+                return Err(TunnelError::Connection(format!(
+                    "QUIC control stream accept: {e}"
+                )));
+            }
+            Err(_) => {
+                connection.close(quinn::VarInt::from_u32(0), b"handshake timeout");
+                return Err(TunnelError::Timeout(format!(
+                    "QUIC control stream not opened within {handshake_timeout:?}"
+                )));
+            }
+        };
 
         let mut ctrl_framed_recv =
             tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
@@ -426,11 +456,20 @@ impl TunnelServer {
             tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
 
         // 1. Handshake on control stream
-        let frame = ctrl_framed_recv
-            .next()
-            .await
-            .ok_or_else(|| TunnelError::Connection("QUIC control stream closed".into()))?
-            .map_err(TunnelError::Io)?;
+        let frame = match read_initial_handshake_frame(
+            &mut ctrl_framed_recv,
+            handshake_timeout,
+            "QUIC server",
+        )
+        .await
+        {
+            Ok(frame) => frame,
+            Err(err @ TunnelError::Timeout(_)) => {
+                connection.close(quinn::VarInt::from_u32(0), b"handshake timeout");
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
 
         let (session_id, tunnel_id, multiplexer) = match frame {
             Frame::Handshake(handshake) => {
@@ -679,5 +718,31 @@ mod tests {
     fn test_version_negotiation_failure() {
         // Client requires 3+, Server only has 1
         assert!(negotiate_version(3, 5).is_err());
+    }
+
+    #[tokio::test]
+    async fn handshake_timeout_releases_session_permit_for_silent_peer() {
+        let (server_side, _client_side) = tokio::io::duplex(1024);
+        let limits = ServerResourceLimits::new(1, 10, 100);
+        let permit = limits.try_acquire_session().unwrap();
+        assert_eq!(limits.available_sessions(), 0);
+
+        let stream: BoxedStream = Box::pin(server_side);
+        let err = TunnelServer::handle_connection(
+            stream,
+            "127.0.0.1:0".parse().unwrap(),
+            SessionStoreBackend::default(),
+            "token".to_string(),
+            permit,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TunnelError::Timeout(msg) if msg.contains("server handshake timed out")
+        ));
+        assert_eq!(limits.available_sessions(), 1);
     }
 }
