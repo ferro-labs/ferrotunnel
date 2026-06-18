@@ -386,33 +386,29 @@ impl TunnelServer {
             // Fail closed: deny stream opens and drop data frames when over limit.
             if let Some(limiter) = &rate_limiter {
                 match &frame {
-                    Frame::OpenStream(open) => {
-                        if limiter.check_stream_open().is_err() {
-                            let stream_id = open.stream_id;
-                            warn!(
-                                session_id = %session_id,
+                    Frame::OpenStream(open) if limiter.check_stream_open().is_err() => {
+                        let stream_id = open.stream_id;
+                        warn!(
+                            session_id = %session_id,
+                            stream_id,
+                            "Stream-open rate limit exceeded; denying stream"
+                        );
+                        // Signal denial to the client so it does not wait indefinitely.
+                        let _ = multiplexer
+                            .send_frame(Frame::CloseStream {
                                 stream_id,
-                                "Stream-open rate limit exceeded; denying stream"
-                            );
-                            // Signal denial to the client so it does not wait indefinitely.
-                            let _ = multiplexer
-                                .send_frame(Frame::CloseStream {
-                                    stream_id,
-                                    reason: CloseReason::Error("rate limited".into()),
-                                })
-                                .await;
-                            continue;
-                        }
+                                reason: CloseReason::Error("rate limited".into()),
+                            })
+                            .await;
+                        continue;
                     }
-                    Frame::Data { data, .. } => {
-                        if limiter.check_data(data.len()).is_err() {
-                            warn!(
-                                session_id = %session_id,
-                                bytes = data.len(),
-                                "Data rate limit exceeded; dropping data frame"
-                            );
-                            continue;
-                        }
+                    Frame::Data { data, .. } if limiter.check_data(data.len()).is_err() => {
+                        warn!(
+                            session_id = %session_id,
+                            bytes = data.len(),
+                            "Data rate limit exceeded; dropping data frame"
+                        );
+                        continue;
                     }
                     _ => {}
                 }

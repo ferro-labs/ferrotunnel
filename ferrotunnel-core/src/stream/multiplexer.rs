@@ -138,7 +138,7 @@ impl Multiplexer {
 
     /// Send a frame directly to the wire (priority derived from frame type and stream).
     ///
-    /// Bounded by [`FRAME_SEND_TIMEOUT`] so a full or torn-down `frame_tx`
+    /// Bounded by a fixed `FRAME_SEND_TIMEOUT` so a full or torn-down `frame_tx`
     /// channel fails fast instead of blocking the caller forever (issue #136).
     pub async fn send_frame(&self, frame: Frame) -> Result<()> {
         let priority = Self::priority_for_frame(&frame, &self.stream_priorities);
