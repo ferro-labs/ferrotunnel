@@ -91,20 +91,30 @@ run_parallel() {
     fi
 }
 
-# Group 1: Independent crates
-echo -e "\n${GREEN}Publishing Group 1 (Independent)...${NC}"
-run_parallel "ferrotunnel-common" "ferrotunnel-plugin" "ferrotunnel-protocol"
+# Crates must be published strictly after every crate they depend on (cargo
+# publish validates ALL dependencies, including optional ones, against the
+# crates.io index). Each group below only depends on crates in earlier groups,
+# so intra-group publishes are safe to run in parallel.
 
-# Group 2: Dependent on Group 1
+# Group 1: foundation crate (no intra-workspace deps)
+echo -e "\n${GREEN}Publishing Group 1 (ferrotunnel-common)...${NC}"
+publish_crate "ferrotunnel-common"
+
+# Group 2: depend only on ferrotunnel-common
 echo -e "\n${GREEN}Publishing Group 2...${NC}"
-run_parallel "ferrotunnel-core" "ferrotunnel-observability"
+run_parallel "ferrotunnel-protocol" "ferrotunnel-plugin" "ferrotunnel-observability"
 
-# Group 3: Dependent on Group 2
-echo -e "\n${GREEN}Publishing Group 3...${NC}"
+# Group 3: ferrotunnel-core (depends on common, protocol, and optionally
+# observability via the `metrics` feature — must publish after Group 2)
+echo -e "\n${GREEN}Publishing Group 3 (ferrotunnel-core)...${NC}"
+publish_crate "ferrotunnel-core"
+
+# Group 4: ferrotunnel-http (depends on core)
+echo -e "\n${GREEN}Publishing Group 4 (ferrotunnel-http)...${NC}"
 publish_crate "ferrotunnel-http"
 
-# Group 4: Final binaries and main crate
-echo -e "\n${GREEN}Publishing Group 4 (Final binaries)...${NC}"
+# Group 5: final binaries and main crate (depend on http + core)
+echo -e "\n${GREEN}Publishing Group 5 (Final binaries)...${NC}"
 run_parallel "ferrotunnel" "ferrotunnel-cli"
 
 echo -e "\n${GREEN}All crates published successfully!${NC}"

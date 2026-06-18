@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-11
+
+### Security
+
+- Fixed token authentication timing side-channel by replacing `HashSet<String>::contains` with constant-time token comparison in `TokenAuthPlugin` ([#124](https://github.com/ferro-labs/ferrotunnel/issues/124)).
+- Hardened the observability dashboard: it now binds to loopback by default, requires explicit opt-in plus authentication for non-loopback binds, removes wildcard CORS, and enforces dashboard API authentication with constant-time token comparison ([#125](https://github.com/ferro-labs/ferrotunnel/issues/125)).
+- Fixed stored XSS risks in the dashboard by rendering captured request paths, headers, tunnel metadata, and public URLs through safe text/escaping paths, and by only using `http` or `https` public URLs as links ([#126](https://github.com/ferro-labs/ferrotunnel/issues/126)).
+- Added client and server handshake read timeouts for TCP, TLS, and QUIC paths so silent peers cannot hold session permits indefinitely ([#127](https://github.com/ferro-labs/ferrotunnel/issues/127)).
+- Stopped requiring server tokens on the command line; the server now supports `FERROTUNNEL_TOKEN`, `--token-file`, or secure prompt fallback, and hides token environment values in help output ([#128](https://github.com/ferro-labs/ferrotunnel/issues/128)).
+- Made `ferrotunnel client --tls` secure by default: verified TLS now requires `--tls-ca` unless `--tls-skip-verify` is explicitly set ([#116](https://github.com/ferro-labs/ferrotunnel/issues/116)).
+- Added warnings and symmetric config handling for TLS/QUIC paths that disable certificate verification ([#143](https://github.com/ferro-labs/ferrotunnel/issues/143)).
+
+### Added
+
+- Added dashboard CLI controls for `--dashboard-bind`, `--dashboard-allow-non-loopback`, and `--dashboard-auth-token`, with a generated dashboard token URL when no token is supplied.
+- Added regression coverage for dashboard bind validation, dashboard API authentication, token-file loading, constant-time plugin auth, TLS argument validation, and handshake timeout behavior.
+
+### Changed
+
+- Updated CLI, deployment, observability, and release-planning docs for the safer token, dashboard, and TLS defaults.
+
 ## [1.0.8] - 2026-04-26
 
 ### Added
