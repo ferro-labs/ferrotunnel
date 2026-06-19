@@ -3,6 +3,7 @@
 //! Provides protocol-agnostic TCP forwarding through the tunnel.
 //! Useful for database connections, SSH, and custom protocols.
 
+use crate::accept_errors::{is_transient_accept_error, AcceptBackoff};
 use ferrotunnel_common::Result;
 use ferrotunnel_core::tunnel::session::SessionStoreBackend;
 use ferrotunnel_protocol::frame::Protocol;
@@ -72,8 +73,28 @@ impl TcpIngress {
         let listener = TcpListener::bind(self.addr).await?;
         info!("TCP Ingress listening on {}", self.addr);
 
+        let mut accept_backoff = AcceptBackoff::default();
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let (stream, peer_addr) = match listener.accept().await {
+                Ok(connection) => {
+                    accept_backoff.reset();
+                    connection
+                }
+                Err(error) if is_transient_accept_error(&error) => {
+                    let (delay, should_log) = accept_backoff.record_failure();
+                    if should_log {
+                        warn!(
+                            bind_addr = %self.addr,
+                            error = %error,
+                            backoff_ms = delay.as_millis(),
+                            "Transient TCP ingress accept error; backing off"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
 
             // CRITICAL: Set TCP_NODELAY to disable Nagle's algorithm for low latency
             if let Err(e) = stream.set_nodelay(true) {

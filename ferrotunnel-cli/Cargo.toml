@@ -17,12 +17,12 @@ doc = false
 
 [dependencies]
 # Core functionality
-ferrotunnel-core = { version = "1.1.0", path = "../ferrotunnel-core", features = [
+ferrotunnel-core = { version = "1.2.0", path = "../ferrotunnel-core", features = [
     "metrics",
 ] }
-ferrotunnel-http = { version = "1.1.0", path = "../ferrotunnel-http" }
-ferrotunnel-protocol = { version = "1.1.0", path = "../ferrotunnel-protocol" }
-ferrotunnel-plugin = { version = "1.1.0", path = "../ferrotunnel-plugin" }
+ferrotunnel-http = { version = "1.2.0", path = "../ferrotunnel-http" }
+ferrotunnel-protocol = { version = "1.2.0", path = "../ferrotunnel-protocol" }
+ferrotunnel-plugin = { version = "1.2.0", path = "../ferrotunnel-plugin" }
 ferrotunnel-observability = { workspace = true, features = [
     "dashboard",
     "axum",

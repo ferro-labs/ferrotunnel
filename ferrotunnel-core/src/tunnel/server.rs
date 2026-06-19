@@ -3,12 +3,13 @@ use crate::resource_limits::{ServerResourceLimits, SessionPermit};
 use crate::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, BoxedStream, TransportConfig};
+use crate::tunnel::accept_backoff::{is_transient_accept_error, AcceptBackoff};
 use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
 use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
-use ferrotunnel_protocol::frame::{Frame, HandshakeFrame, HandshakeStatus};
+use ferrotunnel_protocol::frame::{CloseReason, Frame, HandshakeFrame, HandshakeStatus};
 use futures::{SinkExt, StreamExt};
 use kanal::bounded_async;
 use std::net::SocketAddr;
@@ -17,7 +18,7 @@ use tokio::net::TcpListener;
 #[cfg(feature = "quic")]
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(feature = "quic")]
@@ -27,6 +28,9 @@ use crate::transport::quic;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Interval between periodic stale-session cleanup passes.
+const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct TunnelServer {
     addr: SocketAddr,
     auth_token: String,
@@ -35,6 +39,22 @@ pub struct TunnelServer {
     handshake_timeout: Duration,
     resource_limits: ServerResourceLimits,
     transport_config: TransportConfig,
+    /// Handle to the periodic session-cleanup task.
+    ///
+    /// Stored so the task can be aborted on shutdown (see the `Drop` impl) and
+    /// guarded so exactly one cleanup loop runs per server instance even if both
+    /// `run` and `run_quic` are invoked.
+    cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for TunnelServer {
+    fn drop(&mut self) {
+        // Abort the cleanup loop so it stops ticking and releases its `Arc`
+        // clone of the session store once the server is shut down.
+        if let Some(handle) = self.cleanup_handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl TunnelServer {
@@ -47,6 +67,7 @@ impl TunnelServer {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             resource_limits: ServerResourceLimits::default(),
             transport_config: TransportConfig::default(),
+            cleanup_handle: None,
         }
     }
 
@@ -128,18 +149,21 @@ impl TunnelServer {
         self.sessions.clone()
     }
 
-    pub async fn run(self) -> Result<()> {
-        let listener = TcpListener::bind(self.addr).await?;
-        info!("Server listening on {}", self.addr);
+    /// Start the periodic stale-session cleanup task exactly once.
+    ///
+    /// The `JoinHandle` is stored on the server so the loop can be aborted when
+    /// the server is dropped. If a task is already running this is a no-op,
+    /// guaranteeing a single cleanup loop per server instance even when both
+    /// `run` and `run_quic` are called.
+    fn start_cleanup_task(&mut self) {
+        if self.cleanup_handle.is_some() {
+            return;
+        }
 
-        let sessions = self.sessions.clone();
+        let cleanup_sessions = self.sessions.clone();
         let timeout = self.session_timeout;
-        let handshake_timeout = self.handshake_timeout;
-
-        // Spawn session cleanup task
-        let cleanup_sessions = sessions.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SESSION_CLEANUP_INTERVAL);
             loop {
                 interval.tick().await;
                 let count = cleanup_sessions.cleanup_stale_sessions(timeout);
@@ -148,40 +172,74 @@ impl TunnelServer {
                 }
             }
         });
+        self.cleanup_handle = Some(handle);
+    }
 
+    pub async fn run(mut self) -> Result<()> {
+        let listener = TcpListener::bind(self.addr).await?;
+        info!("Server listening on {}", self.addr);
+
+        self.start_cleanup_task();
+
+        let sessions = self.sessions.clone();
+        let handshake_timeout = self.handshake_timeout;
+
+        // Back off on persistent accept errors (e.g. a failing TLS acceptor or
+        // `EMFILE`) so the loop does not busy-spin at 100% CPU and flood logs.
+        let mut accept_backoff = AcceptBackoff::default();
         loop {
-            match transport::accept(&self.transport_config, &listener).await {
-                Ok((stream, addr)) => {
-                    let session_permit = match self.resource_limits.try_acquire_session() {
-                        Ok(permit) => permit,
-                        Err(e) => {
-                            warn!("Rejecting connection from {}: {}", addr, e);
-                            continue;
-                        }
-                    };
-
-                    let sessions = sessions.clone();
-                    let token = self.auth_token.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(
-                            stream,
-                            addr,
-                            sessions,
-                            token,
-                            session_permit,
-                            handshake_timeout,
-                        )
-                        .await
-                        {
-                            warn!("Connection error for {}: {}", addr, e);
-                        }
-                    });
+            let (stream, addr) = match transport::accept(&self.transport_config, &listener).await {
+                Ok(connection) => {
+                    accept_backoff.reset();
+                    connection
                 }
+                // `transport::accept` performs the per-connection TLS handshake,
+                // so an error here is almost always a single bad/half-open
+                // connection (e.g. a plain-TCP health probe against a TLS
+                // listener), not a broken listener. Never terminate the accept
+                // loop; log (rate-limited) and back off so a persistent error
+                // (failing acceptor, EMFILE) cannot busy-spin a core.
                 Err(e) => {
-                    error!("Accept error: {}", e);
+                    let (delay, should_log) = accept_backoff.record_failure();
+                    if should_log {
+                        warn!(
+                            bind_addr = %self.addr,
+                            error = %e,
+                            transient = is_transient_accept_error(&e),
+                            backoff_ms = delay.as_millis(),
+                            "Accept error; backing off"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
-            }
+            };
+
+            let session_permit = match self.resource_limits.try_acquire_session() {
+                Ok(permit) => permit,
+                Err(e) => {
+                    warn!("Rejecting connection from {}: {}", addr, e);
+                    continue;
+                }
+            };
+
+            let sessions = sessions.clone();
+            let token = self.auth_token.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_connection(
+                    stream,
+                    addr,
+                    sessions,
+                    token,
+                    session_permit,
+                    handshake_timeout,
+                )
+                .await
+                {
+                    warn!("Connection error for {}: {}", addr, e);
+                }
+            });
         }
     }
 
@@ -315,12 +373,45 @@ impl TunnelServer {
                 m.record_decode(1, bytes, decode_start.elapsed());
             }
 
-            // Update heartbeat for any activity
-            if let Some(mut session) = sessions.get_mut(&session_id) {
+            // Update heartbeat for any activity and snapshot the rate limiter.
+            let rate_limiter = if let Some(mut session) = sessions.get_mut(&session_id) {
                 session.update_heartbeat();
+                session.rate_limiter.clone()
             } else {
                 // Session removed (shutdown/timeout)
                 return Err(TunnelError::Protocol("Session not found".into()));
+            };
+
+            // Enforce per-session rate limits on the hot path (issue #119).
+            // Fail closed: deny stream opens and drop data frames when over limit.
+            if let Some(limiter) = &rate_limiter {
+                match &frame {
+                    Frame::OpenStream(open) if limiter.check_stream_open().is_err() => {
+                        let stream_id = open.stream_id;
+                        warn!(
+                            session_id = %session_id,
+                            stream_id,
+                            "Stream-open rate limit exceeded; denying stream"
+                        );
+                        // Signal denial to the client so it does not wait indefinitely.
+                        let _ = multiplexer
+                            .send_frame(Frame::CloseStream {
+                                stream_id,
+                                reason: CloseReason::Error("rate limited".into()),
+                            })
+                            .await;
+                        continue;
+                    }
+                    Frame::Data { data, .. } if limiter.check_data(data.len()).is_err() => {
+                        warn!(
+                            session_id = %session_id,
+                            bytes = data.len(),
+                            "Data rate limit exceeded; dropping data frame"
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
             }
 
             match frame {
@@ -354,7 +445,7 @@ impl TunnelServer {
     ///
     /// This is separate from `run()` which uses TCP. Both can run simultaneously
     /// on different ports.
-    pub async fn run_quic(self, quic_addr: SocketAddr) -> Result<()> {
+    pub async fn run_quic(mut self, quic_addr: SocketAddr) -> Result<()> {
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
@@ -367,56 +458,65 @@ impl TunnelServer {
         let endpoint = quic::create_server_endpoint(&quic_config, quic_addr)?;
         info!("QUIC server listening on {}", quic_addr);
 
+        self.start_cleanup_task();
+
         let sessions = self.sessions.clone();
-        let timeout = self.session_timeout;
         let handshake_timeout = self.handshake_timeout;
 
-        // Spawn session cleanup task
-        let cleanup_sessions = sessions.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                let count = cleanup_sessions.cleanup_stale_sessions(timeout);
-                if count > 0 {
-                    info!("Cleaned up {} stale sessions", count);
-                }
-            }
-        });
-
+        // Back off on persistent accept errors so the loop does not busy-spin
+        // at 100% CPU and flood logs (e.g. `EMFILE` while fds stay exhausted).
+        let mut accept_backoff = AcceptBackoff::default();
         loop {
-            match quic::accept(&endpoint).await {
-                Ok((connection, addr)) => {
-                    let session_permit = match self.resource_limits.try_acquire_session() {
-                        Ok(permit) => permit,
-                        Err(e) => {
-                            warn!("Rejecting QUIC connection from {}: {}", addr, e);
-                            continue;
-                        }
-                    };
-
-                    let sessions = sessions.clone();
-                    let token = self.auth_token.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_quic_connection(
-                            connection,
-                            addr,
-                            sessions,
-                            token,
-                            session_permit,
-                            handshake_timeout,
-                        )
-                        .await
-                        {
-                            warn!("QUIC connection error for {}: {}", addr, e);
-                        }
-                    });
+            let (connection, addr) = match quic::accept(&endpoint).await {
+                Ok(accepted) => {
+                    accept_backoff.reset();
+                    accepted
                 }
+                // QUIC acceptance includes the per-connection handshake, so an
+                // error is almost always one bad connection, not a dead
+                // endpoint. Never terminate the loop; log (rate-limited) and
+                // back off so a persistent failure cannot busy-spin a core.
                 Err(e) => {
-                    error!("QUIC accept error: {}", e);
+                    let (delay, should_log) = accept_backoff.record_failure();
+                    if should_log {
+                        warn!(
+                            bind_addr = %quic_addr,
+                            error = %e,
+                            transient = is_transient_accept_error(&e),
+                            backoff_ms = delay.as_millis(),
+                            "QUIC accept error; backing off"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
-            }
+            };
+
+            let session_permit = match self.resource_limits.try_acquire_session() {
+                Ok(permit) => permit,
+                Err(e) => {
+                    warn!("Rejecting QUIC connection from {}: {}", addr, e);
+                    continue;
+                }
+            };
+
+            let sessions = sessions.clone();
+            let token = self.auth_token.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_quic_connection(
+                    connection,
+                    addr,
+                    sessions,
+                    token,
+                    session_permit,
+                    handshake_timeout,
+                )
+                .await
+                {
+                    warn!("QUIC connection error for {}: {}", addr, e);
+                }
+            });
         }
     }
 
@@ -744,5 +844,212 @@ mod tests {
             TunnelError::Timeout(msg) if msg.contains("server handshake timed out")
         ));
         assert_eq!(limits.available_sessions(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_spawns_only_once() {
+        let mut server = TunnelServer::new("127.0.0.1:0".parse().unwrap(), "token".to_string());
+        assert!(server.cleanup_handle.is_none());
+
+        server.start_cleanup_task();
+        let first_id = server
+            .cleanup_handle
+            .as_ref()
+            .expect("cleanup task should be spawned")
+            .id();
+
+        // A second call (e.g. if both run() and run_quic() execute) must not
+        // spawn a competing cleanup loop.
+        server.start_cleanup_task();
+        let second_id = server
+            .cleanup_handle
+            .as_ref()
+            .expect("cleanup task should still be present")
+            .id();
+
+        assert_eq!(first_id, second_id, "a second cleanup loop was spawned");
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_aborted_when_server_dropped() {
+        let mut server = TunnelServer::new("127.0.0.1:0".parse().unwrap(), "token".to_string());
+        server.start_cleanup_task();
+
+        let abort = server
+            .cleanup_handle
+            .as_ref()
+            .expect("cleanup task should be spawned")
+            .abort_handle();
+        assert!(!abort.is_finished());
+
+        // Dropping the server simulates shutdown; the cleanup task must stop.
+        drop(server);
+
+        // The abort is processed asynchronously; poll until the task stops.
+        for _ in 0..100 {
+            if abort.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            abort.is_finished(),
+            "cleanup task should be aborted after server drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_messages_enforces_stream_open_rate_limit() {
+        use crate::rate_limit::{RateLimiterConfig, SessionRateLimiter};
+        use ferrotunnel_protocol::frame::{OpenStreamFrame, Protocol, StreamPriority};
+        use std::num::NonZeroU32;
+
+        // Duplex channel: the "client" half writes frames the server reads.
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+        // Multiplexer wired to a drained outbound channel so denial frames never block.
+        let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
+        tokio::spawn(async move { while frame_rx.recv().await.is_ok() {} });
+        let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, false);
+
+        // Session with a tight stream-open limiter: capacity = 1 (1/s, burst 1).
+        let session_id = Uuid::new_v4();
+        let tight = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(1).unwrap(),
+            bytes_per_sec: NonZeroU32::new(1000).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let sessions = SessionStoreBackend::default();
+        let session = Session::new(
+            session_id,
+            "tight-tunnel".into(),
+            "127.0.0.1:0".parse().unwrap(),
+            "tok".into(),
+            vec![],
+            Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+        )
+        .with_rate_limiter(SessionRateLimiter::new(&tight));
+        sessions.add(session).unwrap();
+
+        // Client encodes three OpenStream frames, then closes (EOF ends the loop).
+        let mut client = Framed::new(client_side, TunnelCodec::new());
+        for stream_id in [1u32, 3, 5] {
+            client
+                .send(Frame::OpenStream(Box::new(OpenStreamFrame {
+                    stream_id,
+                    protocol: Protocol::TCP,
+                    headers: vec![],
+                    body_hint: None,
+                    priority: StreamPriority::default(),
+                })))
+                .await
+                .unwrap();
+        }
+        client.flush().await.unwrap();
+        drop(client);
+
+        // Drive the production hot path.
+        let server_stream: BoxedStream = Box::pin(server_side);
+        let (read_half, _write_half) = tokio::io::split(server_stream);
+        let framed_read = tokio_util::codec::FramedRead::new(read_half, TunnelCodec::new());
+        TunnelServer::process_messages(framed_read, session_id, sessions, multiplexer)
+            .await
+            .unwrap();
+
+        // Only the first stream-open passes enforcement; the rest are denied.
+        let mut accepted = 0;
+        while new_stream_rx.try_recv().ok().flatten().is_some() {
+            accepted += 1;
+        }
+        assert_eq!(
+            accepted, 1,
+            "rate limiter must deny stream opens over limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_messages_enforces_data_byte_rate_limit() {
+        use crate::rate_limit::{RateLimiterConfig, SessionRateLimiter};
+        use bytes::Bytes;
+        use ferrotunnel_protocol::frame::{OpenStreamFrame, Protocol, StreamPriority};
+        use std::num::NonZeroU32;
+        use tokio::io::AsyncReadExt;
+        use tokio::time::timeout;
+
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+        let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
+        tokio::spawn(async move { while frame_rx.recv().await.is_ok() {} });
+        let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, false);
+
+        // Generous stream-open budget but a byte budget of exactly one frame
+        // (capacity = 8 bytes) so the first data frame consumes the whole quota
+        // and the second is over budget.
+        let session_id = Uuid::new_v4();
+        let tight = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(100).unwrap(),
+            bytes_per_sec: NonZeroU32::new(8).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let sessions = SessionStoreBackend::default();
+        let session = Session::new(
+            session_id,
+            "tight-bytes".into(),
+            "127.0.0.1:0".parse().unwrap(),
+            "tok".into(),
+            vec![],
+            Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+        )
+        .with_rate_limiter(SessionRateLimiter::new(&tight));
+        sessions.add(session).unwrap();
+
+        // Open stream 1, send 8 bytes (the whole 8-byte budget), then 8 more
+        // bytes (over budget -> must be dropped by the Frame::Data limiter arm).
+        let mut client = Framed::new(client_side, TunnelCodec::new());
+        client
+            .send(Frame::OpenStream(Box::new(OpenStreamFrame {
+                stream_id: 1,
+                protocol: Protocol::TCP,
+                headers: vec![],
+                body_hint: None,
+                priority: StreamPriority::default(),
+            })))
+            .await
+            .unwrap();
+        for payload in [&b"AAAAAAAA"[..], &b"BBBBBBBB"[..]] {
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    data: Bytes::copy_from_slice(payload),
+                    end_of_stream: false,
+                })
+                .await
+                .unwrap();
+        }
+        client.flush().await.unwrap();
+        drop(client);
+
+        let server_stream: BoxedStream = Box::pin(server_side);
+        let (read_half, _write_half) = tokio::io::split(server_stream);
+        let framed_read = tokio_util::codec::FramedRead::new(read_half, TunnelCodec::new());
+        // Keep a multiplexer clone alive so the opened stream's channel stays open
+        // after `process_messages` returns; otherwise a dropped (rate-limited) frame
+        // would be indistinguishable from channel-close EOF.
+        let _keepalive = multiplexer.clone();
+        TunnelServer::process_messages(framed_read, session_id, sessions, multiplexer)
+            .await
+            .unwrap();
+
+        // The opened stream receives only the first (in-budget) data frame; the
+        // second is dropped, so a follow-up read has nothing more to deliver.
+        let mut stream = new_stream_rx.recv().await.unwrap();
+        let mut buf = vec![0u8; 64];
+        let first = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..first], b"AAAAAAAA");
+        let second = timeout(Duration::from_millis(300), stream.read(&mut buf)).await;
+        assert!(
+            second.is_err(),
+            "over-budget data frame must be dropped by the rate limiter"
+        );
     }
 }

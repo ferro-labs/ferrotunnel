@@ -31,6 +31,12 @@ impl Default for RateLimiterConfig {
     }
 }
 
+/// Compute an absolute burst capacity from a per-second `rate` and a `burst_factor`
+/// multiplier, saturating at [`NonZeroU32::MAX`] to avoid overflow.
+fn scaled_burst(rate: NonZeroU32, burst_factor: NonZeroU32) -> NonZeroU32 {
+    NonZeroU32::new(rate.get().saturating_mul(burst_factor.get())).unwrap_or(NonZeroU32::MAX)
+}
+
 /// Rate limiter for a single session
 #[derive(Clone)]
 pub struct SessionRateLimiter {
@@ -44,9 +50,14 @@ impl SessionRateLimiter {
     /// Create a new session rate limiter
     #[must_use]
     pub fn new(config: &RateLimiterConfig) -> Self {
-        let stream_quota =
-            Quota::per_second(config.streams_per_sec).allow_burst(config.burst_factor);
-        let bytes_quota = Quota::per_second(config.bytes_per_sec).allow_burst(config.burst_factor);
+        // `allow_burst` sets the ABSOLUTE burst capacity (in cells), not a multiplier.
+        // Because the byte limiter consumes one cell per byte via `check_n`, the burst
+        // capacity must scale with the rate (rate * burst_factor); otherwise a tiny
+        // burst would reject every real data frame.
+        let stream_quota = Quota::per_second(config.streams_per_sec)
+            .allow_burst(scaled_burst(config.streams_per_sec, config.burst_factor));
+        let bytes_quota = Quota::per_second(config.bytes_per_sec)
+            .allow_burst(scaled_burst(config.bytes_per_sec, config.burst_factor));
 
         Self {
             stream_limiter: Arc::new(RateLimiter::direct(stream_quota)),
@@ -62,12 +73,27 @@ impl SessionRateLimiter {
             .map_err(|_| RateLimitError::StreamRateLimited)
     }
 
-    /// Check if data can be sent (by byte count)
-    /// For simplicity, we check once per frame rather than exact bytes
-    pub fn check_data(&self, _bytes: usize) -> Result<(), RateLimitError> {
-        self.bytes_limiter
-            .check()
-            .map_err(|_| RateLimitError::BytesRateLimited)
+    /// Check if `bytes` of data can be sent, accounting for the actual payload size.
+    ///
+    /// Consumes `bytes` tokens from the byte-rate quota via governor's `check_n`
+    /// rather than a single token per frame. Empty payloads are always allowed.
+    ///
+    /// Fails closed: if the payload exceeds the quota's burst capacity (so it could
+    /// never conform), or the current rate is exceeded, this returns an error.
+    pub fn check_data(&self, bytes: usize) -> Result<(), RateLimitError> {
+        // Zero-length frames consume no quota.
+        let Some(n) = NonZeroU32::new(u32::try_from(bytes).unwrap_or(u32::MAX)) else {
+            return Ok(());
+        };
+
+        match self.bytes_limiter.check_n(n) {
+            // All requested cells fit within the current rate.
+            Ok(Ok(())) => Ok(()),
+            // Current rate exceeded; the batch may conform later.
+            Ok(Err(_)) => Err(RateLimitError::BytesRateLimited),
+            // Payload can never fit the burst capacity: fail closed.
+            Err(_insufficient_capacity) => Err(RateLimitError::BytesRateLimited),
+        }
     }
 
     /// Async version - waits until allowed
@@ -142,5 +168,47 @@ mod tests {
         }
         // Should be rate limited after burst
         assert!(limiter.check_stream_open().is_err());
+    }
+
+    #[test]
+    fn check_data_accounts_for_byte_count() {
+        // Capacity = bytes_per_sec * burst_factor = 1000 bytes.
+        let config = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(100).unwrap(),
+            bytes_per_sec: NonZeroU32::new(1000).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let limiter = SessionRateLimiter::new(&config);
+
+        // A single 1000-byte payload consumes the entire burst (proves bytes are
+        // counted, not a single token per frame).
+        assert!(limiter.check_data(1000).is_ok());
+        // The next equally-sized payload is rejected because the quota is exhausted.
+        assert!(limiter.check_data(1000).is_err());
+    }
+
+    #[test]
+    fn check_data_allows_empty_payload() {
+        let config = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(1).unwrap(),
+            bytes_per_sec: NonZeroU32::new(1).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let limiter = SessionRateLimiter::new(&config);
+        // Zero-length frames consume no quota and are always allowed.
+        assert!(limiter.check_data(0).is_ok());
+    }
+
+    #[test]
+    fn check_data_fails_closed_when_payload_exceeds_capacity() {
+        // Capacity = 10 bytes; a 100-byte payload can never conform.
+        let config = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(100).unwrap(),
+            bytes_per_sec: NonZeroU32::new(10).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let limiter = SessionRateLimiter::new(&config);
+        // InsufficientCapacity must fail closed.
+        assert!(limiter.check_data(100).is_err());
     }
 }

@@ -145,13 +145,22 @@ pub async fn get_request_handler(
 ///
 /// GET /api/v1/metrics
 pub async fn metrics_handler() -> Response {
-    let metrics = crate::gather_metrics();
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; charset=utf-8")],
-        metrics,
-    )
-        .into_response()
+    match crate::gather_metrics() {
+        Ok(metrics) => (
+            StatusCode::OK,
+            [("content-type", "text/plain; charset=utf-8")],
+            metrics,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "failed to gather dashboard metrics");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "METRICS_ERROR",
+                "Failed to gather metrics",
+            )
+        }
+    }
 }
 
 /// Replay a specific request.

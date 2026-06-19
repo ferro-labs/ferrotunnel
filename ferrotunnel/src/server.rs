@@ -121,12 +121,14 @@ impl Server {
                 .ok()
         });
 
-        let mut ingress =
-            HttpIngress::new(config.http_bind_addr, sessions.clone(), registry.clone());
+        let ingress = HttpIngress::new(config.http_bind_addr, sessions.clone(), registry.clone());
+        // Shadow (rather than `mut`) so the binding stays immutable when the
+        // `http3` feature is disabled and `alt_svc_header` does not exist.
         #[cfg(feature = "http3")]
-        if let Some(value) = alt_svc_header {
-            ingress = ingress.with_alt_svc_header(value);
-        }
+        let ingress = match alt_svc_header {
+            Some(value) => ingress.with_alt_svc_header(value),
+            None => ingress,
+        };
 
         // Spawn both services
         #[cfg(feature = "quic")]

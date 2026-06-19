@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-19
+
+Hardening release closing the v1.2.0 audit milestone.
+
+### Security
+
+- Bound and time-limit HTTP/1.1+HTTP/2 ingress bodies: `max_request_body_size` cap (oversized → 413) plus a per-frame response read timeout (stalled upstream → 504) ([#132](https://github.com/ferro-labs/ferrotunnel/issues/132)).
+- Enforce the previously dead per-session rate limiter: stream-open limits and byte-accurate data limits ([#119](https://github.com/ferro-labs/ferrotunnel/issues/119)).
+
+### Fixed
+
+- Isolate plugin hook panics so a panicking plugin yields a clean 500 instead of dropping the connection ([#138](https://github.com/ferro-labs/ferrotunnel/issues/138)).
+- Make metrics initialization idempotent and `/metrics` scraping panic-free ([#137](https://github.com/ferro-labs/ferrotunnel/issues/137)).
+- Survive transient `accept()` errors in HTTP/TCP ingress instead of terminating the accept loop ([#131](https://github.com/ferro-labs/ferrotunnel/issues/131)).
+- Back off on accept-loop errors (core TLS/QUIC and ingress) to avoid busy-spinning a core and flooding logs ([#130](https://github.com/ferro-labs/ferrotunnel/issues/130)).
+- Add send timeouts to the frame channel so teardown cannot hang under network partition ([#136](https://github.com/ferro-labs/ferrotunnel/issues/136)).
+- Track and abort the session-cleanup task on shutdown; guarantee one cleanup loop per server ([#135](https://github.com/ferro-labs/ferrotunnel/issues/135)).
+
 ## [1.1.0] - 2026-06-11
 
 ### Security
@@ -276,7 +294,11 @@ FerroTunnel v1.0.0 is the first stable release.
 | `ferrotunnel-observability` | Metrics, tracing, and dashboard |
 | `ferrotunnel-common` | Shared types and errors |
 
-[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.8...v1.1.0
+[1.0.8]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.4...v1.0.6
 [1.0.4]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.2...v1.0.3

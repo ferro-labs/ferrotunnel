@@ -12,14 +12,26 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use ferrotunnel_common::Result;
 use ferrotunnel_protocol::frame::{Frame, OpenStreamFrame, Protocol, StreamPriority};
-use kanal::{bounded_async, AsyncReceiver, AsyncSender, ReceiveError, SendError};
+use kanal::{bounded_async, AsyncReceiver, AsyncSender, ReceiveError};
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::timeout;
 use tracing::warn;
+
+/// Maximum time to wait when sending a frame to the wire channel (`frame_tx`)
+/// before treating the peer as unreachable and failing the send.
+///
+/// The `frame_tx` channel is drained by the batched sender. If that task exits
+/// (teardown) or stalls (network partition with a full channel), a plain
+/// `send().await` would block forever, preventing the read loop from observing
+/// EOF and hanging the session. Bounding every send with this deadline ensures
+/// teardown completes promptly. See issue #136.
+const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pool for reusing read buffers in `VirtualStream`
 pub type ReadBufferPool = ObjectPool<Vec<u8>>;
@@ -53,6 +65,26 @@ pub struct Multiplexer {
     frame_tx: AsyncSender<PrioritizedFrame>,
     new_stream_tx: AsyncSender<VirtualStream>,
     buffer_pool: ReadBufferPool,
+}
+
+/// Send a prioritized frame to the wire channel with a bounded deadline.
+///
+/// Returns a `BrokenPipe` error if the receiver has been dropped and a
+/// `TimedOut` error if the channel stays full past [`FRAME_SEND_TIMEOUT`].
+/// Either way the caller fails fast instead of hanging on teardown (#136).
+async fn send_prioritized_frame(
+    frame_tx: &AsyncSender<PrioritizedFrame>,
+    frame: PrioritizedFrame,
+) -> Result<()> {
+    match timeout(FRAME_SEND_TIMEOUT, frame_tx.send(frame)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()).into()),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out sending frame to wire channel",
+        )
+        .into()),
+    }
 }
 
 impl Multiplexer {
@@ -105,12 +137,12 @@ impl Multiplexer {
     }
 
     /// Send a frame directly to the wire (priority derived from frame type and stream).
+    ///
+    /// Bounded by a fixed `FRAME_SEND_TIMEOUT` so a full or torn-down `frame_tx`
+    /// channel fails fast instead of blocking the caller forever (issue #136).
     pub async fn send_frame(&self, frame: Frame) -> Result<()> {
         let priority = Self::priority_for_frame(&frame, &self.stream_priorities);
-        self.frame_tx
-            .send((priority, frame))
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()).into())
+        send_prioritized_frame(&self.frame_tx, (priority, frame)).await
     }
 
     /// Process an incoming frame from the wire
@@ -220,8 +252,9 @@ impl Multiplexer {
         self.streams.insert(stream_id, tx);
 
         self.stream_priorities.insert(stream_id, priority);
-        self.frame_tx
-            .send((
+        send_prioritized_frame(
+            &self.frame_tx,
+            (
                 priority,
                 Frame::OpenStream(Box::new(OpenStreamFrame {
                     stream_id,
@@ -230,9 +263,9 @@ impl Multiplexer {
                     body_hint: None,
                     priority,
                 })),
-            ))
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
+            ),
+        )
+        .await?;
 
         let read_buffer = self.buffer_pool.try_acquire().unwrap_or_default();
         Ok(VirtualStream::new(
@@ -257,9 +290,29 @@ type RecvFuture = Pin<
     Box<dyn std::future::Future<Output = std::result::Result<Result<Frame>, ReceiveError>> + Send>,
 >;
 
-/// Boxed future type for sending frames
-type SendFuture =
-    Pin<Box<dyn std::future::Future<Output = std::result::Result<(), SendError>> + Send>>;
+/// Boxed future type for sending frames.
+///
+/// Resolves to an `io::Result` because the send is bounded by
+/// [`FRAME_SEND_TIMEOUT`]: a full or closed `frame_tx` surfaces as an error
+/// rather than blocking the writer forever (issue #136).
+type SendFuture = Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send>>;
+
+/// Build the bounded send future stored in `pending_send`.
+///
+/// `poll_write` / `poll_shutdown` cannot `.await`, so the deadline is baked
+/// into the future itself; a timeout or closed channel resolves to an error.
+fn bounded_send_future(tx: AsyncSender<PrioritizedFrame>, frame: PrioritizedFrame) -> SendFuture {
+    Box::pin(async move {
+        match timeout(FRAME_SEND_TIMEOUT, tx.send(frame)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::BrokenPipe, e.to_string())),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out sending frame to wire channel",
+            )),
+        }
+    })
+}
 
 /// A virtual stream that implements `AsyncRead` + `AsyncWrite`
 ///
@@ -437,13 +490,7 @@ impl AsyncWrite for VirtualStream {
                     let bytes_written = self.pending_send_len;
                     self.pending_send = None;
                     self.pending_send_len = 0;
-                    if let Err(e) = result {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            e.to_string(),
-                        )));
-                    }
-                    return Poll::Ready(Ok(bytes_written));
+                    return Poll::Ready(result.map(|()| bytes_written));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -467,7 +514,7 @@ impl AsyncWrite for VirtualStream {
         let tx = self.tx.clone();
         // P3.1: Store length instead of frame, move frame into future
         self.pending_send_len = chunk_size;
-        self.pending_send = Some(Box::pin(async move { tx.send((priority, frame)).await }));
+        self.pending_send = Some(bounded_send_future(tx, (priority, frame)));
 
         // Poll the new future (we set it in the block above)
         let fut = match self.pending_send.as_mut() {
@@ -478,13 +525,7 @@ impl AsyncWrite for VirtualStream {
             Poll::Ready(result) => {
                 self.pending_send = None;
                 self.pending_send_len = 0;
-                match result {
-                    Ok(()) => Poll::Ready(Ok(chunk_size)),
-                    Err(e) => Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        e.to_string(),
-                    ))),
-                }
+                Poll::Ready(result.map(|()| chunk_size))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -515,7 +556,7 @@ impl AsyncWrite for VirtualStream {
         let priority = self.priority;
 
         let tx = self.tx.clone();
-        self.pending_send = Some(Box::pin(async move { tx.send((priority, frame)).await }));
+        self.pending_send = Some(bounded_send_future(tx, (priority, frame)));
 
         let fut = match self.pending_send.as_mut() {
             Some(f) => f,
@@ -524,13 +565,7 @@ impl AsyncWrite for VirtualStream {
         match fut.as_mut().poll(cx) {
             Poll::Ready(result) => {
                 self.pending_send = None;
-                match result {
-                    Ok(()) => Poll::Ready(Ok(())),
-                    Err(e) => Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        e.to_string(),
-                    ))),
-                }
+                Poll::Ready(result)
             }
             Poll::Pending => Poll::Pending,
         }
@@ -562,5 +597,68 @@ mod tests {
 
         let s4 = server_mux.open_stream(Protocol::HTTP).await.unwrap();
         assert_eq!(s4.id(), 4);
+    }
+
+    /// Issue #136: a send must fail fast when the receiver is gone, instead of
+    /// blocking the session loop forever during teardown.
+    #[tokio::test]
+    async fn send_frame_fails_fast_when_receiver_dropped() {
+        let (tx, rx) = bounded_async::<PrioritizedFrame>(1);
+        drop(rx);
+        let (mux, _streams) = Multiplexer::new(tx, true);
+
+        let result = mux.send_frame(Frame::Heartbeat { timestamp: 0 }).await;
+
+        assert!(
+            result.is_err(),
+            "send to a closed frame_tx must return an error"
+        );
+    }
+
+    /// Issue #136: a send must time out (not hang) when the channel stays full
+    /// because the batched sender stopped draining (e.g. network partition).
+    ///
+    /// `start_paused` lets tokio auto-advance virtual time to the send timeout,
+    /// so the test asserts fail-fast behavior without waiting wall-clock.
+    #[tokio::test(start_paused = true)]
+    async fn send_frame_times_out_when_channel_full() {
+        let (tx, _rx) = bounded_async::<PrioritizedFrame>(1);
+        let (mux, _streams) = Multiplexer::new(tx, true);
+
+        // Fill the single slot; `_rx` is kept alive but never drained.
+        mux.send_frame(Frame::Heartbeat { timestamp: 0 })
+            .await
+            .expect("first send fills the only slot");
+
+        let result = mux.send_frame(Frame::Heartbeat { timestamp: 1 }).await;
+
+        assert!(
+            result.is_err(),
+            "send to a full frame_tx must time out rather than hang"
+        );
+    }
+
+    /// Issue #136: `VirtualStream::poll_write` must not block forever when the
+    /// wire channel is full; the bounded send surfaces an error instead.
+    #[tokio::test(start_paused = true)]
+    async fn virtual_stream_write_times_out_when_channel_full() {
+        use tokio::io::AsyncWriteExt;
+
+        let (tx, _rx) = bounded_async::<PrioritizedFrame>(1);
+        let (mux, _streams) = Multiplexer::new(tx, true);
+
+        // `open_stream` consumes the only channel slot with its OpenStream frame.
+        let mut stream = mux
+            .open_stream(Protocol::HTTP)
+            .await
+            .expect("open_stream uses the only slot");
+
+        // Channel is now full and never drained: the write must fail fast.
+        let result = stream.write(b"hello").await;
+
+        assert!(
+            result.is_err(),
+            "write to a full frame_tx must time out rather than hang"
+        );
     }
 }

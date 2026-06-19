@@ -1,3 +1,5 @@
+mod accept_errors;
+
 #[cfg(feature = "http3")]
 pub mod http3_ingress;
 pub mod ingress;
