@@ -966,4 +966,90 @@ mod tests {
             "rate limiter must deny stream opens over limit"
         );
     }
+
+    #[tokio::test]
+    async fn process_messages_enforces_data_byte_rate_limit() {
+        use crate::rate_limit::{RateLimiterConfig, SessionRateLimiter};
+        use bytes::Bytes;
+        use ferrotunnel_protocol::frame::{OpenStreamFrame, Protocol, StreamPriority};
+        use std::num::NonZeroU32;
+        use tokio::io::AsyncReadExt;
+        use tokio::time::timeout;
+
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+        let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
+        tokio::spawn(async move { while frame_rx.recv().await.is_ok() {} });
+        let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, false);
+
+        // Generous stream-open budget but a byte budget of exactly one frame
+        // (capacity = 8 bytes) so the first data frame consumes the whole quota
+        // and the second is over budget.
+        let session_id = Uuid::new_v4();
+        let tight = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(100).unwrap(),
+            bytes_per_sec: NonZeroU32::new(8).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let sessions = SessionStoreBackend::default();
+        let session = Session::new(
+            session_id,
+            "tight-bytes".into(),
+            "127.0.0.1:0".parse().unwrap(),
+            "tok".into(),
+            vec![],
+            Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+        )
+        .with_rate_limiter(SessionRateLimiter::new(&tight));
+        sessions.add(session).unwrap();
+
+        // Open stream 1, send 8 bytes (the whole 8-byte budget), then 8 more
+        // bytes (over budget -> must be dropped by the Frame::Data limiter arm).
+        let mut client = Framed::new(client_side, TunnelCodec::new());
+        client
+            .send(Frame::OpenStream(Box::new(OpenStreamFrame {
+                stream_id: 1,
+                protocol: Protocol::TCP,
+                headers: vec![],
+                body_hint: None,
+                priority: StreamPriority::default(),
+            })))
+            .await
+            .unwrap();
+        for payload in [&b"AAAAAAAA"[..], &b"BBBBBBBB"[..]] {
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    data: Bytes::copy_from_slice(payload),
+                    end_of_stream: false,
+                })
+                .await
+                .unwrap();
+        }
+        client.flush().await.unwrap();
+        drop(client);
+
+        let server_stream: BoxedStream = Box::pin(server_side);
+        let (read_half, _write_half) = tokio::io::split(server_stream);
+        let framed_read = tokio_util::codec::FramedRead::new(read_half, TunnelCodec::new());
+        // Keep a multiplexer clone alive so the opened stream's channel stays open
+        // after `process_messages` returns; otherwise a dropped (rate-limited) frame
+        // would be indistinguishable from channel-close EOF.
+        let _keepalive = multiplexer.clone();
+        TunnelServer::process_messages(framed_read, session_id, sessions, multiplexer)
+            .await
+            .unwrap();
+
+        // The opened stream receives only the first (in-budget) data frame; the
+        // second is dropped, so a follow-up read has nothing more to deliver.
+        let mut stream = new_stream_rx.recv().await.unwrap();
+        let mut buf = vec![0u8; 64];
+        let first = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..first], b"AAAAAAAA");
+        let second = timeout(Duration::from_millis(300), stream.read(&mut buf)).await;
+        assert!(
+            second.is_err(),
+            "over-budget data frame must be dropped by the rate limiter"
+        );
+    }
 }

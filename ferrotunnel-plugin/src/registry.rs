@@ -402,12 +402,14 @@ mod tests {
         registry.register(Arc::new(RwLock::new(PanicResponsePlugin)));
 
         let join = tokio::spawn(async move {
-            let mut res = http::Response::new(Vec::new());
+            // Start from a real upstream response body to prove the contract below.
+            let mut res = http::Response::new(b"real-upstream-body".to_vec());
             let ctx = make_response_ctx();
-            registry.execute_response_hooks(&mut res, &ctx).await
+            let outcome = registry.execute_response_hooks(&mut res, &ctx).await;
+            (outcome, res)
         });
 
-        let result = match join.await {
+        let (result, res) = match join.await {
             Ok(result) => result,
             Err(err) => panic!("registry task should not panic: {err}"),
         };
@@ -418,5 +420,13 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("panic-response"));
         assert!(msg.contains("on_response"));
+        // Contract relied on by the HTTP ingress (#138): on a hook error the
+        // response was moved into the panicked task, so `res` is left as the
+        // empty placeholder. Callers MUST return a clean 500 instead of shipping
+        // `res`, never the original upstream body.
+        assert!(
+            res.body().is_empty(),
+            "panicked response hook must leave the response emptied, not forward it"
+        );
     }
 }

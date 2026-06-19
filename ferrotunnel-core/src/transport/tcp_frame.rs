@@ -10,8 +10,15 @@ use futures::StreamExt;
 use kanal::AsyncSender;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::io::AsyncRead;
+use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
+
+/// Maximum time to wait when pushing a frame to the batched-sender channel
+/// before treating the peer as unreachable. Bounds every send so a full or
+/// closed channel during teardown cannot block the caller forever (#136).
+const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sends frames over TCP by pushing to the channel consumed by the batched sender task.
 #[derive(Clone)]
@@ -30,10 +37,14 @@ impl FrameSender for TcpFrameSender {
         let tx = self.tx.clone();
         Box::pin(async move {
             // Trait API has no priority; use Normal when sending via trait.
-            tx.send((StreamPriority::Normal, frame))
-                .await
-                .map_err(|e| ferrotunnel_common::TunnelError::Protocol(e.to_string()))?;
-            Ok(())
+            // Fail fast on a full/closed channel instead of blocking forever (#136).
+            match timeout(FRAME_SEND_TIMEOUT, tx.send((StreamPriority::Normal, frame))).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(ferrotunnel_common::TunnelError::Protocol(e.to_string())),
+                Err(_) => Err(ferrotunnel_common::TunnelError::Protocol(
+                    "timed out sending frame to wire channel".into(),
+                )),
+            }
         })
     }
 }

@@ -528,7 +528,17 @@ async fn handle_request(
         .await
     {
         Ok(PluginAction::Continue | _) => {}
-        Err(e) => error!("Plugin response hook error: {}", e),
+        // A hook error (including an isolated plugin panic, see #138) leaves
+        // `proxy_res` holding the empty placeholder swapped in by the registry,
+        // so we must not fall through and ship it. Return a clean 500 instead of
+        // a silent empty 200.
+        Err(e) => {
+            error!("Plugin response hook error: {}", e);
+            return Ok(full_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Plugin processing error",
+            ));
+        }
     }
 
     let (final_parts, final_body) = proxy_res.into_parts();
