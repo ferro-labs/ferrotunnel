@@ -69,6 +69,23 @@ pub async fn wait_for_server(addr: SocketAddr, timeout: Duration) -> bool {
     false
 }
 
+pub async fn start_test_server(config: &TestConfig) -> ferrotunnel::Server {
+    let mut server = ferrotunnel::Server::builder()
+        .bind(config.server_addr)
+        .http_bind(config.http_addr)
+        .token(config.token)
+        .build()
+        .expect("Failed to build server");
+
+    server.start().await.expect("Failed to start server");
+    assert!(
+        wait_for_server(config.server_addr, Duration::from_secs(5)).await,
+        "Server did not start in time"
+    );
+
+    server
+}
+
 /// Start a simple HTTP server that echoes requests
 pub async fn start_echo_server(addr: SocketAddr) -> tokio::task::JoinHandle<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

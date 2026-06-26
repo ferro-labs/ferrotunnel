@@ -54,9 +54,7 @@ async fn test_websocket_upgrade_through_tunnel() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_server(server_addr, Duration::from_secs(5)).await,
@@ -130,6 +128,7 @@ async fn test_websocket_upgrade_through_tunnel() {
     drop(read);
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 #[tokio::test]
@@ -151,9 +150,7 @@ async fn test_websocket_raw_upgrade_101() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     assert!(
         wait_for_server(server_addr, Duration::from_secs(5)).await,
@@ -210,6 +207,7 @@ async fn test_websocket_raw_upgrade_101() {
     );
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 #[allow(clippy::result_large_err, clippy::unnecessary_wraps)]
@@ -260,9 +258,7 @@ async fn test_websocket_subprotocol_preserved() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     wait_for_server(server_addr, Duration::from_secs(5)).await;
 
@@ -293,6 +289,7 @@ async fn test_websocket_subprotocol_preserved() {
     assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 #[tokio::test]
@@ -314,9 +311,7 @@ async fn test_websocket_multiple_concurrent_streams() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     wait_for_server(server_addr, Duration::from_secs(5)).await;
 
@@ -365,6 +360,7 @@ async fn test_websocket_multiple_concurrent_streams() {
     }
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 #[tokio::test]
@@ -407,9 +403,7 @@ async fn test_websocket_failed_upgrade_404() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     wait_for_server(server_addr, Duration::from_secs(5)).await;
 
@@ -442,4 +436,5 @@ async fn test_websocket_failed_upgrade_404() {
     }
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }

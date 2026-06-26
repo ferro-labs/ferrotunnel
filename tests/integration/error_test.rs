@@ -1,7 +1,7 @@
 //! Error scenario integration tests
 
-use super::{wait_for_server, TestConfig};
-use ferrotunnel::{Client, Server};
+use super::{start_test_server, TestConfig};
+use ferrotunnel::Client;
 use std::time::Duration;
 
 /// Test upstream connection refused (tunnel -> local service fails)
@@ -11,19 +11,7 @@ async fn test_upstream_connection_refused() {
 
     // Do NOT start local service -> Connection refused
 
-    // Start server
-    let mut server = Server::builder()
-        .bind(config.server_addr)
-        .http_bind(config.http_addr)
-        .token(config.token)
-        .build()
-        .expect("Failed to build server");
-
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
-
-    assert!(wait_for_server(config.server_addr, Duration::from_secs(5)).await);
+    let mut server = start_test_server(&config).await;
 
     // Start client
     let mut client = Client::builder()
@@ -53,6 +41,7 @@ async fn test_upstream_connection_refused() {
     assert_eq!(response.status(), 502);
 
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
 }
 
 /// Test upstream timeout

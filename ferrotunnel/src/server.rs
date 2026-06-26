@@ -13,6 +13,8 @@
 //!     .build()?;
 //!
 //! server.start().await?;
+//! tokio::signal::ctrl_c().await?;
+//! server.shutdown().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -70,24 +72,41 @@ impl Server {
         ServerBuilder::default()
     }
 
-    /// Start the tunnel server.
+    /// Start the tunnel server in the background.
     ///
-    /// This will bind to the configured addresses and start accepting connections.
-    /// The server runs until [`shutdown()`](Self::shutdown) is called.
+    /// This launches the configured tunnel and ingress services. The server runs until
+    /// [`shutdown()`](Self::shutdown) or [`stop()`](Self::stop) is called, or until one
+    /// of the service tasks exits.
     ///
     /// # Errors
     ///
     /// Returns an error if the server is already running.
-    #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> Result<()> {
-        if self.task.is_some() {
+        if self.is_running() {
             return Err(TunnelError::InvalidState("server already started".into()));
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
         }
 
         let config = self.config.clone();
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let transport_config = self.transport_config.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
 
+        self.task = Some(tokio::spawn(async move {
+            Self::run_services(config, transport_config, shutdown_rx).await
+        }));
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn run_services(
+        config: ServerConfig,
+        transport_config: TransportConfig,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         info!("Starting `FerroTunnel` Server");
         info!("  Tunnel bind: {}", config.bind_addr);
         info!("  HTTP bind: {}", config.http_bind_addr);
@@ -96,8 +115,10 @@ impl Server {
             info!("  HTTP/3 bind: {} (UDP)", http3_bind_addr);
         }
 
-        let tunnel_server = TunnelServer::new(config.bind_addr, config.token)
-            .with_transport(self.transport_config.clone());
+        #[cfg(feature = "quic")]
+        let tunnel_transport = transport_config.clone();
+        let tunnel_server =
+            TunnelServer::new(config.bind_addr, config.token).with_transport(transport_config);
 
         // Initialize plugins
         let mut registry = PluginRegistry::new();
@@ -132,8 +153,7 @@ impl Server {
 
         // Spawn both services
         #[cfg(feature = "quic")]
-        let tunnel_handle = {
-            let tunnel_transport = self.transport_config.clone();
+        let mut tunnel_handle = {
             let tunnel_bind_addr = config.bind_addr;
             tokio::spawn(async move {
                 if matches!(tunnel_transport, TransportConfig::Quic(_)) {
@@ -144,8 +164,8 @@ impl Server {
             })
         };
         #[cfg(not(feature = "quic"))]
-        let tunnel_handle = tokio::spawn(async move { tunnel_server.run().await });
-        let ingress_handle = tokio::spawn(async move { ingress.start().await });
+        let mut tunnel_handle = tokio::spawn(async move { tunnel_server.run().await });
+        let mut ingress_handle = tokio::spawn(async move { ingress.start().await });
 
         #[cfg(feature = "http3")]
         let http3_handle = if let Some(http3_bind_addr) = config.http3_bind_addr {
@@ -172,52 +192,57 @@ impl Server {
 
         // Wait for shutdown or either service to exit
         #[cfg(feature = "http3")]
-        if let Some(http3_handle) = http3_handle {
-            tokio::select! {
-                result = tunnel_handle => {
-                    match result {
-                        Ok(inner) => inner?,
-                        Err(e) => return Err(TunnelError::Connection(format!("Tunnel task panicked: {e}"))),
-                    }
+        if let Some(mut http3_handle) = http3_handle {
+            let result = tokio::select! {
+                result = &mut tunnel_handle => Self::service_result("Tunnel", result),
+                result = &mut ingress_handle => Self::service_result("Ingress", result),
+                result = &mut http3_handle => Self::service_result("HTTP/3 ingress", result),
+                changed = shutdown_rx.changed() => {
+                    Self::log_shutdown_result(&changed);
+                    Ok(())
                 }
-                result = ingress_handle => {
-                    match result {
-                        Ok(inner) => inner?,
-                        Err(e) => return Err(TunnelError::Connection(format!("Ingress task panicked: {e}"))),
-                    }
-                }
-                result = http3_handle => {
-                    match result {
-                        Ok(inner) => inner?,
-                        Err(e) => return Err(TunnelError::Connection(format!("HTTP/3 ingress task panicked: {e}"))),
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Server shutdown requested");
-                }
-            }
-            return Ok(());
+            };
+            tunnel_handle.abort();
+            ingress_handle.abort();
+            http3_handle.abort();
+            return result;
         }
 
-        tokio::select! {
-            result = tunnel_handle => {
-                match result {
-                    Ok(inner) => inner?,
-                    Err(e) => return Err(TunnelError::Connection(format!("Tunnel task panicked: {e}"))),
-                }
+        let result = tokio::select! {
+            result = &mut tunnel_handle => Self::service_result("Tunnel", result),
+            result = &mut ingress_handle => Self::service_result("Ingress", result),
+            changed = shutdown_rx.changed() => {
+                Self::log_shutdown_result(&changed);
+                Ok(())
             }
-            result = ingress_handle => {
-                match result {
-                    Ok(inner) => inner?,
-                    Err(e) => return Err(TunnelError::Connection(format!("Ingress task panicked: {e}"))),
-                }
-            }
-            _ = shutdown_rx.changed() => {
+        };
+        tunnel_handle.abort();
+        ingress_handle.abort();
+
+        result
+    }
+
+    fn service_result(
+        name: &str,
+        result: std::result::Result<Result<()>, tokio::task::JoinError>,
+    ) -> Result<()> {
+        match result {
+            Ok(inner) => inner,
+            Err(e) => Err(TunnelError::Connection(format!(
+                "{name} task panicked: {e}"
+            ))),
+        }
+    }
+
+    fn log_shutdown_result(changed: &std::result::Result<(), watch::error::RecvError>) {
+        match changed {
+            Ok(()) => {
                 info!("Server shutdown requested");
             }
+            Err(_) => {
+                info!("Server shutdown channel closed");
+            }
         }
-
-        Ok(())
     }
 
     /// Shutdown the tunnel server and wait for cleanup.
@@ -228,7 +253,14 @@ impl Server {
             let _ = tx.send(true);
         }
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            match task.await {
+                Ok(result) => result?,
+                Err(e) => {
+                    return Err(TunnelError::Connection(format!(
+                        "Server task panicked: {e}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -247,7 +279,7 @@ impl Server {
         if let Some(task) = &self.task {
             !task.is_finished()
         } else {
-            self.shutdown_tx.is_some()
+            false
         }
     }
 
@@ -418,6 +450,28 @@ mod tests {
             .build()
             .expect("should build");
 
+        assert!(!server.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_server_start_shutdown_lifecycle() {
+        let mut server = Server::builder()
+            .bind("127.0.0.1:0".parse().unwrap())
+            .http_bind("127.0.0.1:0".parse().unwrap())
+            .token("secret")
+            .build()
+            .expect("should build");
+
+        server.start().await.expect("server should start");
+        assert!(server.is_running());
+
+        let err = server
+            .start()
+            .await
+            .expect_err("second start should fail while running");
+        assert!(err.to_string().contains("already started"));
+
+        server.shutdown().await.expect("server should shut down");
         assert!(!server.is_running());
     }
 
