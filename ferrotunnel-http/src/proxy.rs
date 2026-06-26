@@ -285,6 +285,15 @@ impl HttpProxy<tower::layer::util::Identity> {
 }
 
 impl<L> HttpProxy<L> {
+    /// Pool used to serve gRPC streams.
+    ///
+    /// Returns a clone of the shared pool so every gRPC stream multiplexes over
+    /// the same upstream HTTP/2 connection and shares one eviction task, instead
+    /// of allocating a fresh pool (and tasks/connections) per stream (see #134).
+    fn grpc_pool(&self) -> Arc<ConnectionPool> {
+        self.pool.clone()
+    }
+
     pub fn with_layer<NewL>(self, layer: NewL) -> HttpProxy<NewL> {
         HttpProxy {
             target_addr: self.target_addr,
@@ -320,9 +329,10 @@ impl<L> HttpProxy<L> {
     /// Serve an incoming gRPC `VirtualStream` over HTTP/2.
     ///
     /// gRPC requires HTTP/2 end-to-end so that trailers (`grpc-status`,
-    /// `grpc-message`) are propagated correctly. This method uses a
-    /// dedicated HTTP/2 connection pool (always acquired via `acquire_h2()`)
-    /// to forward requests to the local service.
+    /// `grpc-message`) are propagated correctly. This method reuses the shared
+    /// pool's multiplexed HTTP/2 connection (acquired via `acquire_h2()`) to
+    /// forward requests, so every gRPC stream shares one upstream connection and
+    /// eviction task rather than allocating a fresh pool per stream.
     pub fn handle_grpc_stream(&self, stream: VirtualStream)
     where
         L: Layer<LocalProxyService> + Clone + Send + 'static,
@@ -332,14 +342,10 @@ impl<L> HttpProxy<L> {
             + 'static,
         <L::Service as Service<Request<Incoming>>>::Future: Send,
     {
-        let grpc_pool = Arc::new(ConnectionPool::new(
-            self.target_addr.clone(),
-            PoolConfig::default(),
-        ));
         let service = self
             .layer
             .clone()
-            .layer(LocalProxyService::with_pool_h2(grpc_pool));
+            .layer(LocalProxyService::with_pool_h2(self.grpc_pool()));
         let hyper_service = TowerToHyperService::new(service);
         let io = TokioIo::new(stream);
 
@@ -436,5 +442,22 @@ mod tests {
         let proxy = HttpProxy::new("127.0.0.1:8080".to_string());
         let _layered = proxy.with_layer(tower::layer::util::Identity::new());
         // Just verify it compiles and runs
+    }
+
+    #[test]
+    fn grpc_stream_reuses_shared_pool() {
+        // #134: handle_grpc_stream must reuse the proxy's shared pool rather than
+        // allocating a brand-new ConnectionPool per VirtualStream. grpc_pool() is
+        // the single source of truth the handler uses for its H2 pool.
+        let proxy = HttpProxy::new("127.0.0.1:8080".to_string());
+        let grpc_pool = proxy.grpc_pool();
+
+        // Identity: the gRPC pool is the same allocation as the shared pool.
+        assert!(
+            Arc::ptr_eq(&grpc_pool, &proxy.pool),
+            "handle_grpc_stream must reuse self.pool, not allocate a new pool"
+        );
+        // Refcount: grpc_pool is a clone of the shared Arc, not a fresh one.
+        assert_eq!(Arc::strong_count(&proxy.pool), 2);
     }
 }

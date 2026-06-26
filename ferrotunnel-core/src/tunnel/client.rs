@@ -8,7 +8,7 @@ use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
 use ferrotunnel_protocol::frame::{Frame, HandshakeFrame, HandshakeStatus};
 use futures::{SinkExt, StreamExt};
-use kanal::bounded_async;
+use kanal::{bounded_async, AsyncReceiver};
 use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
@@ -359,6 +359,30 @@ impl TunnelClient {
     }
 }
 
+/// Spawn the background loop that dispatches each accepted virtual stream to
+/// `stream_handler`.
+///
+/// Each handler is `tokio::spawn`ed (fire-and-forget) so a slow stream cannot
+/// block dispatch of the next one. The loop previously awaited each handler
+/// inline, which serialized all multiplexed TCP streams and — via
+/// `new_stream_rx` backpressure — stalled the frame loop and starved
+/// heartbeats. This mirrors the QUIC accept loop (`quic_stream_accept_loop`).
+/// See issue #129.
+pub(crate) fn spawn_stream_dispatch_loop<F, Fut>(
+    new_stream_rx: AsyncReceiver<VirtualStream>,
+    stream_handler: F,
+) where
+    F: Fn(VirtualStream) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        while let Ok(s) = new_stream_rx.recv().await {
+            // #129: spawn each handler so a slow stream doesn't block the next.
+            tokio::spawn(stream_handler(s));
+        }
+    });
+}
+
 impl TunnelClient {
     async fn handshake<C>(
         framed: &mut Framed<transport::BoxedStream, TunnelCodec>,
@@ -437,11 +461,7 @@ impl TunnelClient {
         tokio::spawn(run_batched_sender(frame_rx, write_half, parts.codec));
 
         let (multiplexer, new_stream_rx) = Multiplexer::new(frame_tx, true);
-        tokio::spawn(async move {
-            while let Ok(s) = new_stream_rx.recv().await {
-                stream_handler(s).await;
-            }
-        });
+        spawn_stream_dispatch_loop(new_stream_rx, stream_handler);
 
         (multiplexer, split_stream)
     }

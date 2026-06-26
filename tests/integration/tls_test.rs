@@ -55,9 +55,7 @@ async fn test_tls_connection() {
         .build()
         .expect("Failed to build server");
 
-    let _server_handle = tokio::spawn(async move {
-        let _ = server.start().await;
-    });
+    server.start().await.expect("Failed to start server");
 
     // Wait for server? (Should we check TCP connect?)
     // But plain TCP connect might hang on handshake if we don't speak TLS?
@@ -91,5 +89,6 @@ async fn test_tls_connection() {
 
     // Clean up
     let _ = client.shutdown().await;
+    let _ = server.shutdown().await;
     let _ = std::fs::remove_dir_all(temp_dir);
 }

@@ -661,4 +661,67 @@ mod tests {
             "write to a full frame_tx must time out rather than hang"
         );
     }
+
+    /// Issue #129: a slow virtual-stream handler must not block a fast one.
+    ///
+    /// Two streams are opened through the real control path (stream A first,
+    /// then B). The TCP dispatch loop spawns each handler, so the fast stream
+    /// B completes before the slow stream A even though A was opened first.
+    /// Under the old serial `stream_handler(s).await` loop, B would be stuck
+    /// behind A's sleep and this assertion would fail (or time out).
+    ///
+    /// `start_paused` lets tokio auto-advance virtual time past A's sleep
+    /// without waiting wall-clock.
+    #[tokio::test(start_paused = true)]
+    async fn slow_stream_does_not_block_concurrent_stream() {
+        use crate::tunnel::client::spawn_stream_dispatch_loop;
+
+        const STREAM_A: u32 = 2;
+        const STREAM_B: u32 = 4;
+        const SLOW_DELAY: Duration = Duration::from_secs(10);
+
+        let (frame_tx, _frame_rx) = bounded_async::<PrioritizedFrame>(64);
+        let (mux, new_stream_rx) = Multiplexer::new(frame_tx, false);
+
+        let (order_tx, mut order_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+
+        // Fire-and-forget dispatch: A sleeps before recording, B records now.
+        spawn_stream_dispatch_loop(new_stream_rx, move |stream: VirtualStream| {
+            let order_tx = order_tx.clone();
+            let id = stream.id();
+            async move {
+                if id == STREAM_A {
+                    tokio::time::sleep(SLOW_DELAY).await;
+                }
+                let _ = order_tx.send(id);
+            }
+        });
+
+        // Push the slow stream first, then the fast stream, via process_frame.
+        for stream_id in [STREAM_A, STREAM_B] {
+            mux.process_frame(Frame::OpenStream(Box::new(OpenStreamFrame {
+                stream_id,
+                protocol: Protocol::TCP,
+                headers: vec![],
+                body_hint: None,
+                priority: StreamPriority::default(),
+            })))
+            .await
+            .expect("process_frame queues the new stream");
+        }
+
+        // B must complete before A despite being opened second. The bounded
+        // timeout fails fast if the dispatch loop serializes handlers.
+        let first = timeout(Duration::from_secs(30), order_rx.recv())
+            .await
+            .expect("first completion within timeout")
+            .expect("order channel stays open");
+        let second = timeout(Duration::from_secs(30), order_rx.recv())
+            .await
+            .expect("second completion within timeout")
+            .expect("order channel stays open");
+
+        assert_eq!(first, STREAM_B, "fast stream B must complete first");
+        assert_eq!(second, STREAM_A, "slow stream A must complete last");
+    }
 }

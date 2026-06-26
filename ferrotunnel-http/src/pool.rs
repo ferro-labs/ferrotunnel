@@ -164,19 +164,26 @@ impl ConnectionPool {
     }
 
     /// Acquire an HTTP/2 connection (multiplexed, shared)
+    ///
+    /// The pool mutex is only held while inspecting/storing the cached sender;
+    /// the TCP connect and HTTP/2 handshake run with the lock released so that
+    /// concurrent callers are not serialized behind a full reconnect. If two
+    /// callers race to dial, the loser drops its freshly created sender (whose
+    /// driver future resolves on drop, so no task leaks) and reuses the winner's.
     pub async fn acquire_h2(&self) -> Result<http2::SendRequest<BoxBody>, ConnectionPoolError> {
-        let mut h2_conn = self.h2_connection.lock().await;
-
-        // Check if we have a valid H2 connection
-        if let Some(ref sender) = *h2_conn {
-            if sender.is_ready() {
-                debug!("Reusing existing HTTP/2 connection");
-                return Ok(sender.clone());
+        // Fast path: reuse a ready cached connection, then drop the guard.
+        {
+            let h2_conn = self.h2_connection.lock().await;
+            if let Some(ref sender) = *h2_conn {
+                if sender.is_ready() {
+                    debug!("Reusing existing HTTP/2 connection");
+                    return Ok(sender.clone());
+                }
+                debug!("HTTP/2 connection not ready, creating new one");
             }
-            debug!("HTTP/2 connection not ready, creating new one");
         }
 
-        // Create new HTTP/2 connection
+        // Create a new HTTP/2 connection with the lock released.
         debug!("Creating new HTTP/2 connection to {}", self.target_addr);
         let stream = TcpStream::connect(&self.target_addr)
             .await
@@ -195,6 +202,16 @@ impl ConnectionPool {
                 debug!("HTTP/2 connection error: {:?}", e);
             }
         });
+
+        // Re-acquire the lock and double-check: another caller may have stored a
+        // ready connection while we were dialing. If so, reuse theirs and drop ours.
+        let mut h2_conn = self.h2_connection.lock().await;
+        if let Some(ref existing) = *h2_conn {
+            if existing.is_ready() {
+                debug!("Discarding redundant HTTP/2 connection, reusing concurrent one");
+                return Ok(existing.clone());
+            }
+        }
 
         *h2_conn = Some(sender.clone());
         Ok(sender)
@@ -224,6 +241,141 @@ impl ConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Spawn a minimal HTTP/2 upstream stub.
+    ///
+    /// Accepts TCP connections and completes a real HTTP/2 handshake so that a
+    /// client `SendRequest` becomes ready. `delay` is applied per connection
+    /// before serving, to simulate a slow upstream. Returns the bound address,
+    /// a counter of accepted inbound TCP connections, and the accept-loop task.
+    async fn spawn_h2_stub(
+        delay: Duration,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use hyper::body::Incoming;
+        use hyper::server::conn::http2 as server_http2;
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioExecutor;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let count = Arc::new(AtomicUsize::new(0));
+        let accept_count = count.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                accept_count.fetch_add(1, Ordering::SeqCst);
+                let conn_delay = delay;
+                tokio::spawn(async move {
+                    if !conn_delay.is_zero() {
+                        tokio::time::sleep(conn_delay).await;
+                    }
+                    let io = TokioIo::new(stream);
+                    let _ = server_http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(
+                            io,
+                            service_fn(|_req: Request<Incoming>| async move {
+                                Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                    Bytes::from_static(b"ok"),
+                                )))
+                            }),
+                        )
+                        .await;
+                });
+            }
+        });
+
+        (addr, count, handle)
+    }
+
+    /// Wait until the HTTP/2 sender finishes its handshake and is ready.
+    async fn wait_until_ready(sender: &http2::SendRequest<BoxBody>) {
+        for _ in 0..200u32 {
+            if sender.is_ready() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("HTTP/2 sender never became ready");
+    }
+
+    /// Wait until the stub has accepted at least `target` inbound connections.
+    async fn wait_for_accepts(accepted: &Arc<AtomicUsize>, target: usize) {
+        for _ in 0..200u32 {
+            if accepted.load(Ordering::SeqCst) >= target {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "stub accepted {} connections, expected at least {target}",
+            accepted.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_h2_reuses_connection_without_redial() {
+        // #133: a second acquire_h2 must reuse the cached ready connection and
+        // must not open a new inbound TCP connection.
+        let (addr, accepted, _stub) = spawn_h2_stub(Duration::ZERO).await;
+        let pool = ConnectionPool::new(addr, PoolConfig::default());
+
+        let sender = pool.acquire_h2().await.expect("first acquire_h2");
+        // The client `SendRequest` can report ready before the server's
+        // userspace accept() runs, so confirm the dial actually landed.
+        wait_for_accepts(&accepted, 1).await;
+        wait_until_ready(&sender).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "first acquire dials once"
+        );
+
+        let _second = pool.acquire_h2().await.expect("second acquire_h2");
+        // Allow any erroneous extra dial to be accepted before asserting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "second acquire_h2 must reuse the cached connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_acquire_h2_is_not_serialized_by_the_lock() {
+        // #133: with the mutex released across connect + handshake, N concurrent
+        // dials overlap and finish in roughly one per-dial delay. The old code
+        // held the lock across I/O, serializing callers. Bounds are generous to
+        // stay non-flaky while still well under N x per-dial delay.
+        let per_dial = Duration::from_millis(200);
+        let n: u32 = 6;
+        let (addr, _accepted, _stub) = spawn_h2_stub(per_dial).await;
+        let pool = Arc::new(ConnectionPool::new(addr, PoolConfig::default()));
+
+        let start = Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..n {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move { pool.acquire_h2().await.is_ok() }));
+        }
+        for handle in handles {
+            assert!(handle.await.unwrap(), "acquire_h2 should succeed");
+        }
+        let elapsed = start.elapsed();
+
+        let bound = per_dial * n / 2;
+        assert!(
+            elapsed < bound,
+            "concurrent acquire_h2 took {elapsed:?}, expected < {bound:?}"
+        );
+    }
 
     #[test]
     fn test_pool_config_default() {

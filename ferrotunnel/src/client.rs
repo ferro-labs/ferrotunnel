@@ -99,6 +99,7 @@ impl Client {
         let tunnel_id = config.tunnel_id.clone();
         let auto_reconnect = config.auto_reconnect;
         let reconnect_delay = config.reconnect_delay;
+        let startup_timeout = config.startup_timeout;
         let transport_config = self.transport_config.clone();
 
         let info_tx = Arc::new(Mutex::new(Some(info_tx)));
@@ -154,10 +155,27 @@ impl Client {
 
         self.task = Some(task);
 
-        // Wait for initial connection
-        info_rx
-            .await
-            .map_err(|_| TunnelError::Connection("Failed to establish connection".into()))
+        // Wait for initial connection, bounded by the optional startup timeout.
+        match startup_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, info_rx).await {
+                Ok(res) => res
+                    .map_err(|_| TunnelError::Connection("Failed to establish connection".into())),
+                Err(_elapsed) => {
+                    if let Some(tx) = self.shutdown_tx.take() {
+                        let _ = tx.send(true);
+                    }
+                    if let Some(task) = self.task.take() {
+                        task.abort();
+                    }
+                    Err(TunnelError::Timeout(
+                        "timed out waiting for initial connection".into(),
+                    ))
+                }
+            },
+            None => info_rx
+                .await
+                .map_err(|_| TunnelError::Connection("Failed to establish connection".into())),
+        }
     }
 
     async fn connect_once(
@@ -325,6 +343,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum time to wait for the initial connection in
+    /// [`Client::start`]. Pass `None` to wait indefinitely.
+    ///
+    /// Default: 30 seconds
+    #[must_use]
+    pub fn startup_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.config.startup_timeout = timeout;
+        self
+    }
+
     /// Configure TLS for the connection.
     ///
     /// When enabled, the client will use TLS to connect to the server.
@@ -441,6 +469,39 @@ mod tests {
             .build()
             .expect("should build");
 
+        assert!(!client.is_running());
+    }
+
+    #[test]
+    fn test_client_builder_startup_timeout_none_is_stored() {
+        let client = Client::builder()
+            .server_addr("localhost:7835")
+            .token("secret")
+            .startup_timeout(None)
+            .build()
+            .expect("should build");
+
+        assert_eq!(client.config().startup_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn start_returns_error_on_unreachable_server_with_auto_reconnect() {
+        let mut client = Client::builder()
+            .server_addr("127.0.0.1:1")
+            .token("secret")
+            .auto_reconnect(true)
+            .reconnect_delay(Duration::from_millis(50))
+            .startup_timeout(Some(Duration::from_millis(300)))
+            .build()
+            .expect("should build");
+
+        let result = tokio::time::timeout(Duration::from_secs(5), client.start()).await;
+
+        let inner = result.expect("start() should resolve within the test deadline");
+        assert!(
+            inner.is_err(),
+            "start() should return an error when the server is unreachable"
+        );
         assert!(!client.is_running());
     }
 
