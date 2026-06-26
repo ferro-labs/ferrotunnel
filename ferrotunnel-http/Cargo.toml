@@ -12,10 +12,10 @@ categories = ["network-programming", "web-programming"]
 description = "HTTP ingress and proxy implementation for FerroTunnel"
 
 [dependencies]
-ferrotunnel-core = { version = "1.2.0", path = "../ferrotunnel-core" }
-ferrotunnel-protocol = { version = "1.2.0", path = "../ferrotunnel-protocol" }
-ferrotunnel-plugin = { version = "1.2.0", path = "../ferrotunnel-plugin" }
-ferrotunnel-common = { version = "1.2.0", path = "../ferrotunnel-common" }
+ferrotunnel-core = { version = "1.3.0", path = "../ferrotunnel-core" }
+ferrotunnel-protocol = { version = "1.3.0", path = "../ferrotunnel-protocol" }
+ferrotunnel-plugin = { version = "1.3.0", path = "../ferrotunnel-plugin" }
+ferrotunnel-common = { version = "1.3.0", path = "../ferrotunnel-common" }
 tokio = { workspace = true }
 hyper = { version = "1", features = ["full", "http2"] }
 http-body-util = "0.1"
@@ -28,7 +28,7 @@ futures = "0.3"
 tower = { version = "0.5", features = ["full"] }
 tower-service = "0.3"
 thiserror = { workspace = true }
-ferrotunnel-observability = { version = "1.2.0", path = "../ferrotunnel-observability", optional = true }
+ferrotunnel-observability = { version = "1.3.0", path = "../ferrotunnel-observability", optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }

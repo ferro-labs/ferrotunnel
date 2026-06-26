@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-26
+
+Bug-fix and reliability release closing the v1.3.0 milestone.
+
+### Fixed
+
+- Supervise the server lifecycle task so `is_running()`, `shutdown()`, and the double-start guard work ([#120](https://github.com/ferro-labs/ferrotunnel/issues/120)).
+- Bound `Client::start()` with a configurable `startup_timeout` so it no longer hangs on initial connection failure under auto-reconnect ([#117](https://github.com/ferro-labs/ferrotunnel/issues/117)).
+- Make duplicate `tunnel_id` registration atomic, closing a TOCTOU race ([#118](https://github.com/ferro-labs/ferrotunnel/issues/118)).
+- Spawn TCP virtual-stream handlers concurrently instead of serializing multiplexed streams ([#129](https://github.com/ferro-labs/ferrotunnel/issues/129)).
+- Don't hold the HTTP/2 connection-pool mutex across connect/handshake ([#133](https://github.com/ferro-labs/ferrotunnel/issues/133)).
+- Reuse the shared connection pool for gRPC streams instead of one pool per stream ([#134](https://github.com/ferro-labs/ferrotunnel/issues/134)).
+- Ingress: return 413 for chunked oversized request bodies and apply a per-frame timeout on the streaming response path ([#159](https://github.com/ferro-labs/ferrotunnel/issues/159)).
+
 ## [1.2.0] - 2026-06-19
 
 Hardening release closing the v1.2.0 audit milestone.
@@ -294,7 +308,8 @@ FerroTunnel v1.0.0 is the first stable release.
 | `ferrotunnel-observability` | Metrics, tracing, and dashboard |
 | `ferrotunnel-common` | Shared types and errors |
 
-[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.8...v1.1.0
 [1.0.8]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.7...v1.0.8
