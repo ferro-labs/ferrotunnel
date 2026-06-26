@@ -33,6 +33,9 @@ pub struct ClientConfig {
 
     /// Delay between reconnection attempts
     pub reconnect_delay: Duration,
+
+    /// Maximum time to wait for the initial connection in `start()`. `None` waits indefinitely. Default 30s.
+    pub startup_timeout: Option<Duration>,
 }
 
 impl ClientConfig {
@@ -60,6 +63,7 @@ impl Default for ClientConfig {
             tunnel_id: None,
             auto_reconnect: true,
             reconnect_delay: Duration::from_secs(5),
+            startup_timeout: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -150,6 +154,7 @@ mod tests {
         assert_eq!(config.local_addr, "127.0.0.1:8080");
         assert!(config.auto_reconnect);
         assert_eq!(config.reconnect_delay, Duration::from_secs(5));
+        assert_eq!(config.startup_timeout, Some(Duration::from_secs(30)));
     }
 
     #[test]
