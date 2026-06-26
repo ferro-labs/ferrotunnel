@@ -1,5 +1,6 @@
 use crate::rate_limit::{RateLimiterConfig, SessionRateLimiter};
 use crate::stream::AnyMultiplexer;
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -95,17 +96,22 @@ impl SessionStore {
     /// Add a new session.
     /// Returns error if `tunnel_id` is already registered by a different session.
     pub fn add(&self, session: Session) -> Result<(), SessionStoreError> {
-        let tunnel_id = session.tunnel_id.clone();
         let session_id = session.id;
 
-        // Check if tunnel_id already exists and belongs to a different session
-        if let Some(existing_id) = self.tunnel_index.get(&tunnel_id) {
-            if *existing_id != session_id {
-                return Err(SessionStoreError::TunnelIdAlreadyExists(tunnel_id));
+        // Atomically claim the tunnel_id via the entry API to avoid a TOCTOU race
+        // between the existence check and insertion (issue #118).
+        match self.tunnel_index.entry(session.tunnel_id.clone()) {
+            Entry::Occupied(entry) => {
+                if *entry.get() != session_id {
+                    return Err(SessionStoreError::TunnelIdAlreadyExists(
+                        entry.key().clone(),
+                    ));
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(session_id);
             }
         }
-
-        self.tunnel_index.insert(tunnel_id, session_id);
         self.sessions.insert(session_id, session);
         Ok(())
     }
@@ -239,17 +245,24 @@ impl ShardedSessionStore {
 
     /// Add a new session. Returns error if `tunnel_id` is already registered by a different session.
     pub fn add(&self, session: Session) -> Result<(), SessionStoreError> {
-        let tunnel_id = session.tunnel_id.clone();
         let session_id = session.id;
-        let idx = shard_index(&tunnel_id, self.n_shards);
+        let idx = shard_index(&session.tunnel_id, self.n_shards);
         let (tunnel_index, sessions) = &self.shards[idx];
 
-        if let Some(existing_id) = tunnel_index.get(&tunnel_id) {
-            if *existing_id != session_id {
-                return Err(SessionStoreError::TunnelIdAlreadyExists(tunnel_id));
+        // Atomically claim the tunnel_id on the selected shard via the entry API
+        // to avoid a TOCTOU race between the existence check and insertion (issue #118).
+        match tunnel_index.entry(session.tunnel_id.clone()) {
+            Entry::Occupied(entry) => {
+                if *entry.get() != session_id {
+                    return Err(SessionStoreError::TunnelIdAlreadyExists(
+                        entry.key().clone(),
+                    ));
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(session_id);
             }
         }
-        tunnel_index.insert(tunnel_id, session_id);
         sessions.insert(session_id, session);
         Ok(())
     }
@@ -555,5 +568,93 @@ mod tests {
         store.remove(&id);
         assert_eq!(store.count(), 0);
         assert!(store.get_by_tunnel_id("shard-tunnel").is_none());
+    }
+
+    /// Number of concurrent handshakes racing on the same tunnel_id.
+    const RACE_THREADS: usize = 32;
+
+    #[test]
+    fn test_concurrent_add_same_tunnel_id_no_orphan() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let store = SessionStore::new();
+        let addr = "127.0.0.1:1234".parse().unwrap();
+        let barrier = Arc::new(Barrier::new(RACE_THREADS));
+
+        let handles: Vec<_> = (0..RACE_THREADS)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let session = Session::new(
+                        Uuid::new_v4(),
+                        "race-tunnel".into(),
+                        addr,
+                        "token".into(),
+                        vec![],
+                        None,
+                    );
+                    // Release all threads simultaneously to force a true race.
+                    barrier.wait();
+                    store.add(session)
+                })
+            })
+            .collect();
+
+        let mut ok = 0usize;
+        let mut conflicts = 0usize;
+        for handle in handles {
+            match handle.join().expect("thread panicked") {
+                Ok(()) => ok += 1,
+                Err(SessionStoreError::TunnelIdAlreadyExists(_)) => conflicts += 1,
+            }
+        }
+
+        assert_eq!(ok, 1, "exactly one registration should succeed");
+        assert_eq!(conflicts, RACE_THREADS - 1, "all others must conflict");
+        assert_eq!(store.count(), 1, "no orphaned session should remain");
+    }
+
+    #[test]
+    fn test_sharded_concurrent_add_same_tunnel_id_no_orphan() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let store = ShardedSessionStore::with_shards(4);
+        let addr = "127.0.0.1:1234".parse().unwrap();
+        let barrier = Arc::new(Barrier::new(RACE_THREADS));
+
+        let handles: Vec<_> = (0..RACE_THREADS)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let session = Session::new(
+                        Uuid::new_v4(),
+                        "race-tunnel".into(),
+                        addr,
+                        "token".into(),
+                        vec![],
+                        None,
+                    );
+                    barrier.wait();
+                    store.add(session)
+                })
+            })
+            .collect();
+
+        let mut ok = 0usize;
+        let mut conflicts = 0usize;
+        for handle in handles {
+            match handle.join().expect("thread panicked") {
+                Ok(()) => ok += 1,
+                Err(SessionStoreError::TunnelIdAlreadyExists(_)) => conflicts += 1,
+            }
+        }
+
+        assert_eq!(ok, 1, "exactly one registration should succeed");
+        assert_eq!(conflicts, RACE_THREADS - 1, "all others must conflict");
+        assert_eq!(store.count(), 1, "no orphaned session should remain");
     }
 }
