@@ -34,6 +34,9 @@ h3-quinn = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 
+[dev-dependencies]
+kanal = "0.1"
+
 [features]
 http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn", "dep:rustls"]
 quic = ["ferrotunnel-core/quic"]

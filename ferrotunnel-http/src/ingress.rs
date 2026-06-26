@@ -10,8 +10,12 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -55,7 +59,11 @@ pub struct HttpIngress {
     connection_semaphore: Arc<Semaphore>,
 }
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+/// Boxed error type for custom body wrappers. `hyper::Error` has no public
+/// constructor, so wrappers that emit their own errors (oversized request body,
+/// stalled response body) widen the body error type to this trait object.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type BoxBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
 impl HttpIngress {
     pub fn new(
@@ -285,7 +293,17 @@ async fn handle_request(
         ));
     }
 
-    let limited_body = http_body_util::Limited::new(body, config.max_request_body_size).boxed();
+    // Shared flag flipped by `LimitedBody` the moment a frame pushes the request
+    // body past the cap. Declared before the is_grpc split so both the gRPC and
+    // HTTP/1 upstream send-error arms can map a send failure to a precise 413
+    // instead of a generic 502.
+    let body_oversized = Arc::new(AtomicBool::new(false));
+    let limited_body = LimitedBody::new(
+        body,
+        config.max_request_body_size,
+        Arc::clone(&body_oversized),
+    )
+    .boxed();
     let mut forward_req = Request::from_parts(parts, limited_body);
 
     // HTTP/2 (gRPC) requires an absolute URI (scheme + authority).
@@ -361,6 +379,15 @@ async fn handle_request(
         let res = match response_result {
             Ok(Ok(res)) => res,
             Ok(Err(e)) => {
+                // Known limitation: if the upstream sent its head before
+                // consuming the body, the 413 cannot be guaranteed (the send
+                // error then reflects a genuine failure). Matches H3 ingress.
+                if body_oversized.load(Ordering::Acquire) {
+                    return Ok(full_response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "Request body too large",
+                    ));
+                }
                 error!("gRPC request failed: {}", e);
                 return Ok(full_response(
                     StatusCode::BAD_GATEWAY,
@@ -377,9 +404,14 @@ async fn handle_request(
         };
 
         let (parts, body) = res.into_parts();
-        // Stream the response body directly to preserve HTTP/2 trailers
+        // Stream the response body directly to preserve HTTP/2 trailers. Headers
+        // are already flushed here, so a per-frame stall aborts the body
+        // mid-stream (mirrors H3 send_streaming_response).
         return Ok(with_alt_svc_header(
-            Response::from_parts(parts, body.boxed()),
+            Response::from_parts(
+                parts,
+                TimeoutBody::new(body, config.response_timeout).boxed(),
+            ),
             &config,
         ));
     }
@@ -421,6 +453,15 @@ async fn handle_request(
     let res = match response_result {
         Ok(Ok(res)) => res,
         Ok(Err(e)) => {
+            // Known limitation: if the upstream sent its head before consuming
+            // the body, the 413 cannot be guaranteed (the send error then
+            // reflects a genuine failure). Matches H3 ingress.
+            if body_oversized.load(Ordering::Acquire) {
+                return Ok(full_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Request body too large",
+                ));
+            }
             error!("Failed to send request: {}", e);
             return Ok(full_response(
                 StatusCode::BAD_GATEWAY,
@@ -490,7 +531,10 @@ async fn handle_request(
     let (parts, body) = res.into_parts();
 
     if !registry.needs_response_buffering().await {
-        let streaming_body = body.boxed();
+        // Headers are already flushed on the streaming path, so a stalled
+        // upstream aborts the body mid-stream via the per-frame timeout
+        // (mirrors H3 send_streaming_response). See RESPONSE_BODY_TIMEOUT_STATUS.
+        let streaming_body = TimeoutBody::new(body, config.response_timeout).boxed();
         return Ok(with_alt_svc_header(
             Response::from_parts(parts, streaming_body),
             &config,
@@ -550,6 +594,162 @@ async fn handle_request(
         Response::from_parts(final_parts, boxed_body),
         &config,
     ))
+}
+
+/// Error emitted by [`LimitedBody`] when the forwarded request body exceeds the cap.
+#[derive(Debug)]
+struct RequestBodyTooLarge;
+
+impl std::fmt::Display for RequestBodyTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request body exceeds configured maximum")
+    }
+}
+
+impl std::error::Error for RequestBodyTooLarge {}
+
+/// A request-body wrapper that hard-caps the bytes forwarded upstream.
+///
+/// Unlike `http_body_util::Limited` — whose error surfaces only mid-stream
+/// inside the upstream send path and gets mapped to a generic 502 — this wrapper
+/// flips the shared `exceeded` flag the instant a frame pushes the body past
+/// `remaining`. The ingress reads that flag in the upstream send-error arms and
+/// returns a precise `413 Payload Too Large`.
+struct LimitedBody<B> {
+    inner: B,
+    remaining: usize,
+    exceeded: Arc<AtomicBool>,
+}
+
+impl<B> LimitedBody<B> {
+    fn new(inner: B, remaining: usize, exceeded: Arc<AtomicBool>) -> Self {
+        Self {
+            inner,
+            remaining,
+            exceeded,
+        }
+    }
+}
+
+impl<B> hyper::body::Body for LimitedBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    if data.len() > this.remaining {
+                        this.exceeded.store(true, Ordering::Release);
+                        return Poll::Ready(Some(Err(Box::new(RequestBodyTooLarge))));
+                    }
+                    this.remaining -= data.len();
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Status conceptually equivalent to a streaming-response per-frame timeout.
+///
+/// The streaming path flushes headers before the body, so a stall aborts the
+/// body mid-stream and no status can actually be sent. This const mirrors the
+/// buffered path's `BodyCollectError::Timeout` (504) and the H3 ingress for
+/// symmetry, and is asserted in tests.
+#[allow(dead_code)]
+const RESPONSE_BODY_TIMEOUT_STATUS: StatusCode = StatusCode::GATEWAY_TIMEOUT;
+
+/// Error emitted by [`TimeoutBody`] when the response body stalls between frames.
+#[derive(Debug)]
+struct ResponseBodyTimeout;
+
+impl std::fmt::Display for ResponseBodyTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("response body timed out between frames")
+    }
+}
+
+impl std::error::Error for ResponseBodyTimeout {}
+
+/// A response-body wrapper enforcing a per-frame inactivity timeout.
+///
+/// The streaming response path (when no plugin needs buffering) forwards the
+/// upstream body frame by frame. Without this guard a stalled upstream pins the
+/// connection indefinitely. The deadline resets on every delivered frame; while
+/// the inner body is `Pending` the sleep is polled and an elapse surfaces as a
+/// `ResponseBodyTimeout` error (mirrors H3 `send_streaming_response`).
+struct TimeoutBody<B> {
+    inner: B,
+    timeout: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl<B> TimeoutBody<B> {
+    fn new(inner: B, timeout: Duration) -> Self {
+        Self {
+            inner,
+            timeout,
+            sleep: Box::pin(tokio::time::sleep(timeout)),
+        }
+    }
+}
+
+impl<B> hyper::body::Body for TimeoutBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                this.sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + this.timeout);
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => match this.sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Some(Err(Box::new(ResponseBodyTimeout)))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 /// Returns `true` if the request declares a `Content-Length` larger than `max_size`.
@@ -889,15 +1089,20 @@ mod tests {
         assert!(!content_length_exceeds(&headers, 1024));
     }
 
-    // Acceptance (1): an oversized request body is rejected. The `Limited`
-    // wrapper used on the forwarded request body errors once the cap is passed,
-    // hard-capping bodies that have no declared Content-Length.
+    // Acceptance (1): `LimitedBody` flips the shared flag and errors once a frame
+    // pushes the body past the cap, so the upstream send-error arm can map it to
+    // a 413 (rather than the generic 502 the old `Limited` wrapper produced).
     #[tokio::test]
-    async fn oversized_request_body_is_rejected_by_limited() {
+    async fn limited_body_sets_flag_and_errors_when_oversized() {
+        let exceeded = Arc::new(AtomicBool::new(false));
         let body = http_body_util::Full::new(Bytes::from(vec![0u8; 2048]));
-        let limited = http_body_util::Limited::new(body, 1024);
-        let result = limited.collect().await;
-        assert!(result.is_err(), "body over the limit must be rejected");
+        let limited = LimitedBody::new(body, 1024, Arc::clone(&exceeded));
+        let result = limited.boxed().collect().await;
+        assert!(result.is_err(), "body over the limit must error");
+        assert!(
+            exceeded.load(Ordering::Acquire),
+            "the shared exceeded flag must be set"
+        );
     }
 
     #[tokio::test]
@@ -917,11 +1122,11 @@ mod tests {
         type Error = std::convert::Infallible;
 
         fn poll_frame(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>>
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>>
         {
-            std::task::Poll::Pending
+            Poll::Pending
         }
     }
 
@@ -950,5 +1155,96 @@ mod tests {
         let body = http_body_util::Full::new(Bytes::from_static(b"hello"));
         let result = collect_body_with_limit(body, 1024, Duration::from_secs(5)).await;
         assert_eq!(result, Ok(Bytes::from_static(b"hello")));
+    }
+
+    // Acceptance (2): the streaming response path enforces a per-frame timeout, so
+    // a stalled upstream surfaces an error mid-stream instead of pinning the
+    // connection. `TimeoutBody` wraps a body that never yields a frame.
+    #[tokio::test]
+    async fn streaming_response_body_times_out_per_frame() {
+        use hyper::body::Body as _;
+
+        let mut body = TimeoutBody::new(StalledBody, Duration::from_millis(50));
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+        assert!(matches!(frame, Some(Err(_))), "stalled body must time out");
+        assert_eq!(RESPONSE_BODY_TIMEOUT_STATUS, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    // Acceptance (1) end-to-end: a chunked request body (no Content-Length) that
+    // exceeds `max_request_body_size` is rejected with 413 through the real
+    // `handle_request` forward path, not a generic 502.
+    #[tokio::test]
+    async fn chunked_oversized_request_body_returns_413() {
+        use ferrotunnel_core::stream::{AnyMultiplexer, Multiplexer, PrioritizedFrame};
+        use ferrotunnel_core::tunnel::session::Session;
+        use kanal::bounded_async;
+
+        // Drain-backed multiplexer: outbound frames are discarded so open_stream
+        // and the upstream HTTP/1 handshake succeed without a real tunnel client.
+        let (frame_tx, frame_rx) = bounded_async::<PrioritizedFrame>(1024);
+        tokio::spawn(async move { while frame_rx.recv().await.is_ok() {} });
+        let (multiplexer, _new_stream_rx) = Multiplexer::new(frame_tx, true);
+
+        let tunnel_id = "oversized.test";
+        let sessions = SessionStoreBackend::default();
+        let session = Session::new(
+            uuid::Uuid::new_v4(),
+            tunnel_id.to_string(),
+            "127.0.0.1:0".parse().unwrap(),
+            "tok".into(),
+            vec![],
+            Some(AnyMultiplexer::Tcp(multiplexer)),
+        );
+        sessions.add(session).unwrap();
+
+        let config = IngressConfig {
+            max_request_body_size: 1024,
+            ..IngressConfig::default()
+        };
+
+        // Ingress side: an ephemeral listener driven by the real handle_request.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let registry = Arc::new(PluginRegistry::new());
+        let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req| {
+                handle_request(
+                    req,
+                    sessions.clone(),
+                    registry.clone(),
+                    peer_addr,
+                    config.clone(),
+                )
+            });
+            let _ = AutoBuilder::new(TokioExecutor::new())
+                .serve_connection(io, service)
+                .await;
+        });
+
+        // Client side: send a CHUNKED body (StreamBody => no Content-Length).
+        let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let chunks: Vec<std::result::Result<hyper::body::Frame<Bytes>, std::convert::Infallible>> =
+            vec![Ok(hyper::body::Frame::data(Bytes::from(vec![0u8; 4096])))];
+        let body = http_body_util::StreamBody::new(futures::stream::iter(chunks));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", tunnel_id)
+            .body(body)
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
