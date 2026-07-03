@@ -3,7 +3,7 @@ use crate::stream::{Multiplexer, PrioritizedFrame, VirtualStream};
 use crate::transport::batched_sender::run_batched_sender;
 use crate::transport::{self, TransportConfig};
 use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
-use ferrotunnel_common::{Result, TunnelError};
+use ferrotunnel_common::{LimitsConfig, Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
 use ferrotunnel_protocol::frame::{Frame, HandshakeFrame, HandshakeStatus};
@@ -30,6 +30,7 @@ pub struct TunnelClient {
     tunnel_id: Option<String>,
     transport_config: TransportConfig,
     handshake_timeout: Duration,
+    limits_config: LimitsConfig,
 }
 
 impl TunnelClient {
@@ -41,12 +42,21 @@ impl TunnelClient {
             tunnel_id: None,
             transport_config: TransportConfig::default(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            limits_config: LimitsConfig::default(),
         }
     }
 
     #[must_use]
     pub fn with_transport(mut self, config: TransportConfig) -> Self {
         self.transport_config = config;
+        self
+    }
+
+    /// Set the resource limits used to build the frame codec (frame size and
+    /// control-frame validation bounds).
+    #[must_use]
+    pub fn with_limits(mut self, limits: LimitsConfig) -> Self {
+        self.limits_config = limits;
         self
     }
 
@@ -153,6 +163,7 @@ impl TunnelClient {
         Fut: Future<Output = ()> + Send + 'static,
         C: FnOnce(Uuid) + Send + 'static,
     {
+        crate::limits::validate_limits(&self.limits_config)?;
         validate_token_format(&self.auth_token, 256)
             .map_err(|e| TunnelError::Authentication(format!("Invalid token: {e}")))?;
 
@@ -160,7 +171,7 @@ impl TunnelClient {
         let stream = transport::connect(&self.transport_config, &self.server_addr).await?;
         info!("Connected to {}", self.server_addr);
 
-        let mut framed = Framed::new(stream, TunnelCodec::new());
+        let mut framed = Framed::new(stream, TunnelCodec::from_limits(&self.limits_config));
         let session_id = Self::handshake(&mut framed, self, on_connected).await?;
         self.session_id = Some(session_id);
 
@@ -196,6 +207,7 @@ impl TunnelClient {
         Fut: Future<Output = ()> + Send + 'static,
         C: FnOnce(Uuid) + Send + 'static,
     {
+        crate::limits::validate_limits(&self.limits_config)?;
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
@@ -216,10 +228,14 @@ impl TunnelClient {
             .await
             .map_err(|e| TunnelError::Connection(format!("QUIC open control stream: {e}")))?;
 
-        let mut ctrl_framed_send =
-            tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
-        let mut ctrl_framed_recv =
-            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
+        let mut ctrl_framed_send = tokio_util::codec::FramedWrite::new(
+            ctrl_send,
+            TunnelCodec::from_limits(&self.limits_config),
+        );
+        let mut ctrl_framed_recv = tokio_util::codec::FramedRead::new(
+            ctrl_recv,
+            TunnelCodec::from_limits(&self.limits_config),
+        );
 
         // Handshake
         ctrl_framed_send

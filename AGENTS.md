@@ -74,6 +74,15 @@ Internet → HttpIngress(:8080) → SessionStore → AnyMultiplexer → [TCP: Mu
 - Prefer `Bytes` for zero-copy buffers, `kanal` for async channels, `DashMap` for concurrent maps
 - TLS uses `rustls` 0.23 + ring crypto provider (must call `install_default()` before any TLS config)
 
+## Public-Facing Wording
+
+Keep all public-facing text — commit messages, rustdoc (`///` doc comments),
+`CHANGELOG.md`, `ROADMAP.md`, and GitHub issues/PRs — **neutral and
+outcome-focused**. Do **not** reference internal tooling, code-review services,
+AI assistants, private decisions, or how the change was produced; describe
+*what* changed and *why* it matters to users. Commit messages stay short and
+imperative; rustdoc stays brief with no meta-commentary or disclaimers.
+
 ## Publishing
 
 Crates must be published in dependency order:

@@ -62,10 +62,6 @@ fn http3_context() -> Http3TestContext {
 
 #[tokio::test]
 async fn test_http3_request_through_tunnel_and_alt_svc_advertised() {
-    let _ = rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let context = http3_context();
     let local_port = get_free_port();
     let local_addr = format!("127.0.0.1:{local_port}");
@@ -134,10 +130,6 @@ async fn test_http3_request_through_tunnel_and_alt_svc_advertised() {
 
 #[tokio::test]
 async fn test_http3_unknown_host_returns_not_found() {
-    let _ = rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let context = http3_context();
     let mut server = Server::builder()
         .bind(context.server_addr)

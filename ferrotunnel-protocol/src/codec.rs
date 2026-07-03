@@ -9,12 +9,15 @@
 
 use crate::constants::MAX_FRAME_SIZE;
 use crate::frame::{Frame, ZeroCopyFrame};
+use crate::validation::{validate_frame, ValidationLimits};
 use bytes::{Buf, BufMut, BytesMut};
+use ferrotunnel_common::LimitsConfig;
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
 /// Frame header size: 4 bytes length + 1 byte type
 const HEADER_SIZE: usize = 5;
+const MIN_MAX_FRAME_SIZE: usize = 1;
 
 const FRAME_TYPE_CONTROL: u8 = 0x00;
 const FRAME_TYPE_DATA: u8 = 0x01;
@@ -35,16 +38,19 @@ const FLAG_EOS: u8 = 0x01;
 /// Payload format depends on Type:
 /// - Control (0x00): `bincode(Frame)` (excluding `Frame::Data`)
 /// - Data (0x01): `[StreamID(u32)][Flags(u8)][Raw Bytes...]`
+// `Copy` is required, not cosmetic: the tunnel client/server split a `Framed`
+// via `into_parts()` and then read `parts.codec` more than once (for the split
+// reader and for the batched sender). Keep this `Copy` — switching to `Clone`
+// breaks that split-stream pattern.
 #[derive(Debug, Clone, Copy)]
 pub struct TunnelCodec {
     max_frame_size: usize,
+    validation: ValidationLimits,
 }
 
 impl Default for TunnelCodec {
     fn default() -> Self {
-        Self {
-            max_frame_size: MAX_FRAME_SIZE as usize,
-        }
+        Self::with_max_frame_size(MAX_FRAME_SIZE as usize)
     }
 }
 
@@ -55,10 +61,70 @@ impl TunnelCodec {
         Self::default()
     }
 
-    /// Create a new codec instance with a custom max frame size
+    /// Enforce the frame-size contract shared by every constructor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_frame_size` is zero or exceeds [`MAX_FRAME_SIZE`]. This is
+    /// a programmer-error contract: configured limits coming from user input are
+    /// validated (and rejected with an error) at the configuration boundary
+    /// before reaching the codec.
+    #[inline]
+    fn assert_frame_size(max_frame_size: usize) {
+        assert!(
+            max_frame_size >= MIN_MAX_FRAME_SIZE,
+            "max frame size must be greater than zero"
+        );
+        assert!(
+            max_frame_size <= MAX_FRAME_SIZE as usize,
+            "max frame size must not exceed MAX_FRAME_SIZE"
+        );
+    }
+
+    /// Create a new codec instance with a custom max frame size.
+    ///
+    /// Only the byte budget (`max_frame_size`) is set from the argument; the
+    /// per-field cardinality and element-size bounds keep their default floors.
+    /// Use [`TunnelCodec::from_limits`] to derive both from a [`LimitsConfig`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_frame_size` is zero or exceeds [`MAX_FRAME_SIZE`], the
+    /// protocol frame ceiling. This is a programmer-error contract: user-supplied
+    /// limits are validated and rejected with an error at the configuration
+    /// boundary before reaching the codec.
     #[inline]
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
-        Self { max_frame_size }
+        Self::assert_frame_size(max_frame_size);
+        Self {
+            max_frame_size,
+            validation: ValidationLimits {
+                max_frame_bytes: max_frame_size as u64,
+                max_payload_bytes: max_frame_size,
+                ..ValidationLimits::default()
+            },
+        }
+    }
+
+    /// Create a new codec instance from configured resource limits.
+    ///
+    /// Both the byte budget and the per-field cardinality/element-size bounds
+    /// enforced during [`Decoder::decode`] are derived from `limits`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `limits.max_frame_bytes` is zero or exceeds [`MAX_FRAME_SIZE`];
+    /// see [`TunnelCodec::with_max_frame_size`].
+    #[inline]
+    pub fn from_limits(limits: &LimitsConfig) -> Self {
+        let Ok(max_frame_size) = usize::try_from(limits.max_frame_bytes) else {
+            panic!("max frame size must fit in usize")
+        };
+        Self::assert_frame_size(max_frame_size);
+        Self {
+            max_frame_size,
+            validation: ValidationLimits::from(limits),
+        }
     }
 
     /// Get the configured max frame size
@@ -146,6 +212,78 @@ impl TunnelCodec {
     }
 }
 
+/// Headroom added to the physical frame length when sizing the bincode decode
+/// budget.
+///
+/// bincode claims `len * size_of::<T>()` up front for a collection before
+/// decoding its elements, so a valid dense collection of small elements claims
+/// more than its wire size. This covers the largest such backbone a valid
+/// control frame can produce (`max_headers` entries in an `OpenStream`) with
+/// wide margin, so legitimate frames never trip the budget on backbone overhead.
+const CONTROL_DECODE_HEADROOM: usize = 64 * 1024;
+
+/// Decode a bincode-encoded control frame with a fixed allocation limit.
+///
+/// Rejects a payload with trailing bytes after the bincode-encoded frame: a
+/// well-formed control frame consumes its entire body.
+#[inline]
+fn decode_control_frame_with<const LIMIT: usize>(bytes: &[u8]) -> Result<Frame, io::Error> {
+    let config = bincode_next::config::standard().with_limit::<LIMIT>();
+    let (frame, consumed) = bincode_next::serde::decode_from_slice::<Frame, _>(bytes, config)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}")))?;
+    if consumed != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Trailing bytes after control frame: consumed {consumed} of {}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(frame)
+}
+
+/// Decode a bincode control frame with the allocation budget bounded to the
+/// physical frame length.
+///
+/// bincode eagerly allocates for a declared string/collection length *before*
+/// confirming those bytes are present, bounded only by the configured decode
+/// limit. A fixed `MAX_FRAME_SIZE` (16 MB) limit therefore lets a physically
+/// tiny frame that declares a huge length force an allocation up to that
+/// ceiling. Since no valid frame can declare more content than its own size
+/// (plus a small, bounded collection backbone — see [`CONTROL_DECODE_HEADROOM`]),
+/// the budget is capped at the next power of two `>= bytes.len() + headroom`
+/// (a fixed ladder, as `with_limit` is const-generic). This keeps a small frame
+/// from forcing a large allocation while still accepting every valid frame;
+/// large allocations then require a proportionally large frame (no
+/// amplification). `bytes.len()` is already bounded to `max_frame_size`
+/// (`<= MAX_FRAME_SIZE`) by the caller.
+fn decode_control_frame(bytes: &[u8]) -> Result<Frame, io::Error> {
+    let budget = bytes
+        .len()
+        .saturating_add(CONTROL_DECODE_HEADROOM)
+        .checked_next_power_of_two()
+        .unwrap_or(MAX_FRAME_SIZE as usize)
+        .min(MAX_FRAME_SIZE as usize);
+    macro_rules! ladder {
+        ($($limit:expr),+ $(,)?) => {
+            match budget {
+                $(b if b <= $limit => decode_control_frame_with::<{ $limit }>(bytes),)+
+                _ => decode_control_frame_with::<{ MAX_FRAME_SIZE as usize }>(bytes),
+            }
+        };
+    }
+    ladder!(
+        1 << 17,
+        1 << 18,
+        1 << 19,
+        1 << 20,
+        1 << 21,
+        1 << 22,
+        1 << 23,
+    )
+}
+
 impl Decoder for TunnelCodec {
     type Item = Frame;
     type Error = io::Error;
@@ -214,15 +352,16 @@ impl Decoder for TunnelCodec {
                 }))
             }
             FRAME_TYPE_CONTROL => {
-                // Control frame: bincode-encoded Frame
-                let config =
-                    bincode_next::config::standard().with_limit::<{ MAX_FRAME_SIZE as usize }>();
-                let (frame, _) =
-                    bincode_next::serde::decode_from_slice(frame_bytes.as_ref(), config).map_err(
-                        |e| {
-                            io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}"))
-                        },
-                    )?;
+                // Control frame: bincode-encoded Frame. Two layers of runtime
+                // enforcement: (1) `decode_control_frame` caps bincode's
+                // allocation budget at the physical frame length so a frame
+                // cannot force an allocation larger than its real size, and
+                // (2) `validate_frame` bounds the cardinality and per-element
+                // size of the decoded frame's variable-length contents.
+                let frame = decode_control_frame(frame_bytes.as_ref())?;
+                validate_frame(&frame, &self.validation).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("Frame validation: {e}"))
+                })?;
                 Ok(Some(frame))
             }
             _ => Err(io::Error::new(
@@ -320,6 +459,112 @@ mod tests {
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
 
         assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn decode_rejects_oversized_register_metadata() {
+        // A `Register` that fits the frame-size budget but carries an abusive
+        // number of metadata entries must be rejected by the decode path.
+        let mut codec = TunnelCodec::new();
+        let mut metadata = std::collections::HashMap::new();
+        for i in 0..1000 {
+            metadata.insert(format!("k{i}"), "v".to_string());
+        }
+        let frame = Frame::Register {
+            service_name: "svc".into(),
+            protocol: crate::frame::Protocol::HTTP,
+            metadata,
+        };
+
+        let mut buf = BytesMut::new();
+        codec
+            .encode(frame, &mut buf)
+            .expect("encode fits in frame size");
+
+        let err = codec.decode(&mut buf).expect_err("decode must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("validation"));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_openstream_headers() {
+        // An `OpenStream` that fits the frame-size budget but carries an abusive
+        // number of headers must be rejected by the decode path.
+        let mut codec = TunnelCodec::new();
+        let headers = (0..1000)
+            .map(|i| (format!("h{i}"), "v".to_string()))
+            .collect();
+        let frame = Frame::OpenStream(Box::new(crate::frame::OpenStreamFrame {
+            stream_id: 1,
+            protocol: crate::frame::Protocol::HTTP,
+            headers,
+            body_hint: None,
+            priority: crate::frame::StreamPriority::default(),
+        }));
+
+        let mut buf = BytesMut::new();
+        codec
+            .encode(frame, &mut buf)
+            .expect("encode fits in frame size");
+
+        let err = codec.decode(&mut buf).expect_err("decode must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("validation"));
+    }
+
+    #[test]
+    fn decode_bounds_allocation_to_physical_frame_size() {
+        // A 13-byte control frame that declares a 15 MB `Error` message must be
+        // rejected by bincode's allocation limit *before* it allocates, not
+        // after. The decode limit is capped at the physical frame length, so
+        // the declared length trips `LimitExceeded` rather than allocating 15 MB
+        // and then failing with `UnexpectedEnd`.
+        //
+        // Wire bytes: [len prefix = 9][type = CONTROL]
+        //   [disc 10 = Error][Option None][ErrorCode idx 0]
+        //   [message len varint = 15_000_000: 0xFC + u32 LE][no message bytes]
+        let mut buf = BytesMut::from(
+            &[
+                0x00, 0x00, 0x00, 0x09, // length prefix (BE u32) = 9
+                0x00, // FRAME_TYPE_CONTROL
+                0x0A, // enum discriminant 10 = Frame::Error
+                0x00, // stream_id: Option = None
+                0x00, // code: ErrorCode variant index 0
+                0xFC, 0xC0, 0xE1, 0xE4, 0x00, // message len = 15_000_000 (u32 marker)
+            ][..],
+        );
+
+        let mut codec = TunnelCodec::new();
+        let err = codec.decode(&mut buf).expect_err("decode must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("LimitExceeded"),
+            "expected allocation limit to fire before reading, got: {err}"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_control_frame_with_trailing_bytes() {
+        // Encode a valid control frame, then append a byte inside the framed
+        // length so the bincode payload has trailing data. Decode must reject it.
+        let mut codec = TunnelCodec::new();
+        let mut buf = BytesMut::new();
+        codec
+            .encode(Frame::Heartbeat { timestamp: 7 }, &mut buf)
+            .expect("encode");
+
+        // Splice one extra payload byte in and bump the length prefix by one.
+        let mut tampered = buf.to_vec();
+        let new_len = u32::from_be_bytes([tampered[0], tampered[1], tampered[2], tampered[3]]) + 1;
+        tampered[0..4].copy_from_slice(&new_len.to_be_bytes());
+        tampered.push(0xFF);
+        let mut framed = BytesMut::from(&tampered[..]);
+
+        let err = codec
+            .decode(&mut framed)
+            .expect_err("trailing bytes must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Trailing bytes"));
     }
 
     #[test]
@@ -453,6 +698,32 @@ mod tests {
 
         // Should fail validation before trying to read more
         let result = codec.decode(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "max frame size must be greater than zero")]
+    fn test_zero_max_frame_size_rejected() {
+        let _codec = TunnelCodec::with_max_frame_size(0);
+    }
+
+    #[test]
+    fn test_from_limits_enforces_configured_frame_size() {
+        let limits = LimitsConfig {
+            max_frame_bytes: 8,
+            ..Default::default()
+        };
+        let mut codec = TunnelCodec::from_limits(&limits);
+        assert_eq!(codec.max_frame_size(), 8);
+        let mut buf = BytesMut::new();
+
+        let frame = Frame::Data {
+            stream_id: 1,
+            data: Bytes::from_static(b"abc"),
+            end_of_stream: false,
+        };
+
+        let result = codec.encode(frame, &mut buf);
         assert!(result.is_err());
     }
 

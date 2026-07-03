@@ -4,8 +4,9 @@
 //! in your applications.
 
 use ferrotunnel_common::{
-    Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR, DEFAULT_TUNNEL_PORT,
+    LimitsConfig, Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR, DEFAULT_TUNNEL_PORT,
 };
+use ferrotunnel_core::validate_limits;
 use std::net::SocketAddr;
 #[cfg(feature = "http3")]
 use std::path::PathBuf;
@@ -36,6 +37,9 @@ pub struct ClientConfig {
 
     /// Maximum time to wait for the initial connection in `start()`. `None` waits indefinitely. Default 30s.
     pub startup_timeout: Option<Duration>,
+
+    /// Resource limits for protocol framing and connection handling.
+    pub limits: LimitsConfig,
 }
 
 impl ClientConfig {
@@ -50,6 +54,7 @@ impl ClientConfig {
         if self.local_addr.is_empty() {
             return Err(TunnelError::Config("local_addr is required".into()));
         }
+        validate_limits(&self.limits)?;
         Ok(())
     }
 }
@@ -64,6 +69,7 @@ impl Default for ClientConfig {
             auto_reconnect: true,
             reconnect_delay: Duration::from_secs(5),
             startup_timeout: Some(Duration::from_secs(30)),
+            limits: LimitsConfig::default(),
         }
     }
 }
@@ -93,6 +99,9 @@ pub struct ServerConfig {
 
     /// Authentication token (clients must provide this)
     pub token: String,
+
+    /// Resource limits for protocol framing and connection handling.
+    pub limits: LimitsConfig,
 }
 
 impl ServerConfig {
@@ -101,6 +110,7 @@ impl ServerConfig {
         if self.token.is_empty() {
             return Err(TunnelError::Config("token is required".into()));
         }
+        validate_limits(&self.limits)?;
         #[cfg(feature = "http3")]
         if self.http3_bind_addr.is_some()
             && (self.http3_cert_path.is_none() || self.http3_key_path.is_none())
@@ -125,6 +135,7 @@ impl Default for ServerConfig {
             #[cfg(feature = "http3")]
             http3_key_path: None,
             token: String::new(),
+            limits: LimitsConfig::default(),
         }
     }
 }
@@ -155,6 +166,7 @@ mod tests {
         assert!(config.auto_reconnect);
         assert_eq!(config.reconnect_delay, Duration::from_secs(5));
         assert_eq!(config.startup_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.limits.max_frame_bytes, 16 * 1024 * 1024);
     }
 
     #[test]
@@ -166,6 +178,33 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_client_config_validate_rejects_zero_frame_limit() {
+        let mut config = ClientConfig {
+            server_addr: "localhost:7835".to_string(),
+            token: "secret-token".to_string(),
+            local_addr: "127.0.0.1:8080".to_string(),
+            ..Default::default()
+        };
+        config.limits.max_frame_bytes = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_frame_bytes"));
+    }
+
+    #[test]
+    fn test_client_config_validate_rejects_oversized_frame_limit() {
+        let mut config = ClientConfig {
+            server_addr: "localhost:7835".to_string(),
+            token: "secret-token".to_string(),
+            local_addr: "127.0.0.1:8080".to_string(),
+            ..Default::default()
+        };
+        // Just above the protocol frame ceiling (16 MiB) is now rejected.
+        config.limits.max_frame_bytes = 17 * 1024 * 1024;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_frame_bytes"));
     }
 
     #[test]
@@ -213,6 +252,7 @@ mod tests {
             SocketAddr::from(([0, 0, 0, 0], 8080))
         );
         assert!(config.token.is_empty());
+        assert_eq!(config.limits.max_frame_bytes, 16 * 1024 * 1024);
     }
 
     #[test]
@@ -222,6 +262,29 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_server_config_validate_rejects_zero_frame_limit() {
+        let mut config = ServerConfig {
+            token: "secret-token".to_string(),
+            ..Default::default()
+        };
+        config.limits.max_frame_bytes = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_frame_bytes"));
+    }
+
+    #[test]
+    fn test_server_config_validate_rejects_oversized_frame_limit() {
+        let mut config = ServerConfig {
+            token: "secret-token".to_string(),
+            ..Default::default()
+        };
+        // Just above the protocol frame ceiling (16 MiB) is now rejected.
+        config.limits.max_frame_bytes = 17 * 1024 * 1024;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_frame_bytes"));
     }
 
     #[test]

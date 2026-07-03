@@ -7,9 +7,17 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_pki_types::pem::PemObject;
 use std::io::{self, ErrorKind};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+fn install_default_crypto_provider() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        // Err means another process-wide provider is already installed, which is acceptable.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TlsTransportConfig {
@@ -121,6 +129,8 @@ pub(crate) fn create_client_config_with_context(
     transport: &'static str,
     server_name: Option<&str>,
 ) -> io::Result<Arc<ClientConfig>> {
+    install_default_crypto_provider();
+
     let builder = ClientConfig::builder();
 
     let builder = if config.skip_verify {
@@ -169,6 +179,8 @@ fn warn_insecure_verification(transport: &'static str, server_name: Option<&str>
 }
 
 pub fn create_server_config(config: &TlsTransportConfig) -> io::Result<Arc<ServerConfig>> {
+    install_default_crypto_provider();
+
     let certs = load_certs(Path::new(&config.cert_path))?;
     let key = load_private_key(Path::new(&config.key_path))?;
 
@@ -259,5 +271,18 @@ mod tests {
 
         assert!(tls.skip_verify);
         assert_eq!(tls.server_name.as_deref(), Some("localhost"));
+    }
+
+    #[test]
+    fn create_client_config_installs_crypto_provider() {
+        // An embedder that never installs a rustls provider must still be able to
+        // build a client TLS config: the library installs the default provider.
+        // `skip_verify` avoids needing a CA/cert file for this check.
+        let config = TlsTransportConfig {
+            skip_verify: true,
+            ..Default::default()
+        };
+
+        assert!(super::create_client_config(&config).is_ok());
     }
 }

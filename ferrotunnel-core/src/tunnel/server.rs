@@ -6,7 +6,7 @@ use crate::transport::{self, BoxedStream, TransportConfig};
 use crate::tunnel::accept_backoff::{is_transient_accept_error, AcceptBackoff};
 use crate::tunnel::common::{clamp_u128_to_u64, read_initial_handshake_frame};
 use crate::tunnel::session::{Session, SessionStoreBackend, ShardedSessionStore};
-use ferrotunnel_common::{Result, TunnelError};
+use ferrotunnel_common::{LimitsConfig, Result, TunnelError};
 use ferrotunnel_protocol::codec::TunnelCodec;
 use ferrotunnel_protocol::constants::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION};
 use ferrotunnel_protocol::frame::{CloseReason, Frame, HandshakeFrame, HandshakeStatus};
@@ -45,6 +45,7 @@ pub struct TunnelServer {
     /// guarded so exactly one cleanup loop runs per server instance even if both
     /// `run` and `run_quic` are invoked.
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+    limits_config: LimitsConfig,
 }
 
 impl Drop for TunnelServer {
@@ -68,6 +69,7 @@ impl TunnelServer {
             resource_limits: ServerResourceLimits::default(),
             transport_config: TransportConfig::default(),
             cleanup_handle: None,
+            limits_config: LimitsConfig::default(),
         }
     }
 
@@ -87,6 +89,14 @@ impl TunnelServer {
     #[must_use]
     pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
         self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Set the resource limits used to build the frame codec (frame size and
+    /// control-frame validation bounds).
+    #[must_use]
+    pub fn with_limits(mut self, limits: LimitsConfig) -> Self {
+        self.limits_config = limits;
         self
     }
 
@@ -176,6 +186,7 @@ impl TunnelServer {
     }
 
     pub async fn run(mut self) -> Result<()> {
+        crate::limits::validate_limits(&self.limits_config)?;
         let listener = TcpListener::bind(self.addr).await?;
         info!("Server listening on {}", self.addr);
 
@@ -225,6 +236,7 @@ impl TunnelServer {
 
             let sessions = sessions.clone();
             let token = self.auth_token.clone();
+            let limits = self.limits_config.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(
@@ -234,6 +246,7 @@ impl TunnelServer {
                     token,
                     session_permit,
                     handshake_timeout,
+                    limits,
                 )
                 .await
                 {
@@ -251,8 +264,9 @@ impl TunnelServer {
         expected_token: String,
         _session_permit: SessionPermit,
         handshake_timeout: Duration,
+        limits_config: LimitsConfig,
     ) -> Result<()> {
-        let mut framed = Framed::new(stream, TunnelCodec::new());
+        let mut framed = Framed::new(stream, TunnelCodec::from_limits(&limits_config));
 
         // 1. Handshake
         let frame = read_initial_handshake_frame(&mut framed, handshake_timeout, "server").await?;
@@ -446,6 +460,7 @@ impl TunnelServer {
     /// This is separate from `run()` which uses TCP. Both can run simultaneously
     /// on different ports.
     pub async fn run_quic(mut self, quic_addr: SocketAddr) -> Result<()> {
+        crate::limits::validate_limits(&self.limits_config)?;
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
@@ -502,6 +517,7 @@ impl TunnelServer {
 
             let sessions = sessions.clone();
             let token = self.auth_token.clone();
+            let limits = self.limits_config.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_quic_connection(
@@ -511,6 +527,7 @@ impl TunnelServer {
                     token,
                     session_permit,
                     handshake_timeout,
+                    limits,
                 )
                 .await
                 {
@@ -532,6 +549,7 @@ impl TunnelServer {
         expected_token: String,
         _session_permit: SessionPermit,
         handshake_timeout: Duration,
+        limits_config: LimitsConfig,
     ) -> Result<()> {
         // Accept the control stream (first bidi stream opened by client)
         let (ctrl_send, ctrl_recv) = match timeout(handshake_timeout, connection.accept_bi()).await
@@ -551,9 +569,11 @@ impl TunnelServer {
         };
 
         let mut ctrl_framed_recv =
-            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::new());
-        let mut ctrl_framed_send =
-            tokio_util::codec::FramedWrite::new(ctrl_send, TunnelCodec::new());
+            tokio_util::codec::FramedRead::new(ctrl_recv, TunnelCodec::from_limits(&limits_config));
+        let mut ctrl_framed_send = tokio_util::codec::FramedWrite::new(
+            ctrl_send,
+            TunnelCodec::from_limits(&limits_config),
+        );
 
         // 1. Handshake on control stream
         let frame = match read_initial_handshake_frame(
@@ -835,6 +855,7 @@ mod tests {
             "token".to_string(),
             permit,
             Duration::from_millis(1),
+            LimitsConfig::default(),
         )
         .await
         .unwrap_err();

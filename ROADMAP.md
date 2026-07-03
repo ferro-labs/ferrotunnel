@@ -53,6 +53,12 @@ Embeddable, extensible, and observable reverse tunnel for Rust developers.
   - CLI flags: `--quic-bind` (server), `--quic` / `--quic-0rtt` (client)
   - **Differentiator**: Next-gen transport for competitive advantage
 
+- **v1.1.0 – v1.4.0** - Security & Reliability Hardening ✅
+  - Audit-driven hardening across dashboard/TLS auth (v1.1.0), ingress and
+    session-resource limits (v1.2.0), concurrency and lifecycle correctness
+    (v1.3.0), and wire-protocol and configuration hardening (v1.4.0)
+  - **Value**: Production-grade robustness ahead of the API-stabilization window
+
 ### Planned
 
 > **Strategy**: Prioritize features that maximize user adoption and "time to first success"

@@ -44,10 +44,6 @@ async fn wait_for_quic_server(
 /// Test basic QUIC connection: client connects to server, handshake succeeds
 #[tokio::test]
 async fn test_quic_connection() {
-    let _ = rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let quic_port = get_free_port();
     let local_port = get_free_port();
     let quic_addr: std::net::SocketAddr = format!("127.0.0.1:{quic_port}").parse().unwrap();
@@ -169,10 +165,6 @@ async fn test_quic_connection() {
 /// Test the public builder APIs over QUIC with HTTP ingress routing.
 #[tokio::test]
 async fn test_public_api_quic_routing() {
-    let _ = rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let quic_port = get_free_port();
     let http_port = get_free_port();
     let local_port = get_free_port();
