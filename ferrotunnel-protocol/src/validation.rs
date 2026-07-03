@@ -185,7 +185,9 @@ pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), Va
             server_capabilities,
             ..
         } => validate_capabilities(server_capabilities, limits),
-        Frame::RegisterAck { public_url, .. } => check_field_len(public_url.len(), limits.max_url_len),
+        Frame::RegisterAck { public_url, .. } => {
+            check_field_len(public_url.len(), limits.max_url_len)
+        }
         Frame::Data { data, .. } => validate_payload(data.len(), limits),
         Frame::Register {
             service_name,
@@ -193,7 +195,9 @@ pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), Va
             ..
         } => validate_register(service_name, metadata, limits),
         Frame::OpenStream(open) => validate_open_stream(open, limits),
-        Frame::Error { message, .. } => check_field_len(message.len(), limits.max_error_message_len),
+        Frame::Error { message, .. } => {
+            check_field_len(message.len(), limits.max_error_message_len)
+        }
         Frame::PluginData { plugin_id, data } => {
             check_field_len(plugin_id.len(), limits.max_name_len)?;
             validate_payload(data.len(), limits)
