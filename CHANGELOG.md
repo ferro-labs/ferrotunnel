@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-03
+
+Protocol and configuration hardening release closing the v1.4.0 milestone.
+
+### Security
+
+- Validate every wire-frame variant in the decode path so oversized or
+  high-cardinality control-frame contents are rejected before use, closing an
+  allocation-amplification vector reachable by an authenticated peer ([#139](https://github.com/ferro-labs/ferrotunnel/issues/139)).
+- Bound the control-frame decode allocation to the frame size, so a small frame
+  can no longer force a large allocation while decoding, and large allocations
+  require a proportionally large frame ([#163](https://github.com/ferro-labs/ferrotunnel/issues/163)).
+
+### Fixed
+
+- Wire the configured frame/limit settings through to the codec so
+  `max_frame_bytes` is enforced by client and server, and reject a zero or
+  oversized configured limit ([#144](https://github.com/ferro-labs/ferrotunnel/issues/144)).
+- Install the rustls crypto provider automatically for embedded library TLS
+  users, so `Client`/`Server` builders no longer require a manual provider
+  install ([#121](https://github.com/ferro-labs/ferrotunnel/issues/121)).
+
 ## [1.3.0] - 2026-06-26
 
 Bug-fix and reliability release closing the v1.3.0 milestone.
