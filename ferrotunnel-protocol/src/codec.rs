@@ -38,6 +38,10 @@ const FLAG_EOS: u8 = 0x01;
 /// Payload format depends on Type:
 /// - Control (0x00): `bincode(Frame)` (excluding `Frame::Data`)
 /// - Data (0x01): `[StreamID(u32)][Flags(u8)][Raw Bytes...]`
+// `Copy` is required, not cosmetic: the tunnel client/server split a `Framed`
+// via `into_parts()` and then read `parts.codec` more than once (for the split
+// reader and for the batched sender). Keep this `Copy` — switching to `Clone`
+// breaks that split-stream pattern.
 #[derive(Debug, Clone, Copy)]
 pub struct TunnelCodec {
     max_frame_size: usize,
@@ -57,7 +61,7 @@ impl TunnelCodec {
         Self::default()
     }
 
-    /// Create a new codec instance with a custom max frame size
+    /// Enforce the wire-size contract shared by every constructor.
     ///
     /// # Panics
     ///
@@ -66,7 +70,7 @@ impl TunnelCodec {
     /// coming from user input are validated (and rejected with an error) at the
     /// configuration boundary before reaching the codec.
     #[inline]
-    pub fn with_max_frame_size(max_frame_size: usize) -> Self {
+    fn assert_frame_size(max_frame_size: usize) {
         assert!(
             max_frame_size >= MIN_MAX_FRAME_SIZE,
             "max frame size must be greater than zero"
@@ -75,6 +79,23 @@ impl TunnelCodec {
             u32::try_from(max_frame_size).is_ok(),
             "max frame size must fit in the wire length prefix"
         );
+    }
+
+    /// Create a new codec instance with a custom max frame size.
+    ///
+    /// Only the byte budget (`max_frame_size`) is set from the argument; the
+    /// per-field cardinality and element-size bounds keep their default floors.
+    /// Use [`TunnelCodec::from_limits`] to derive both from a [`LimitsConfig`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_frame_size` is zero or does not fit in the `u32` wire
+    /// length prefix. This is a programmer-error contract: user-supplied limits
+    /// are validated and rejected with an error at the configuration boundary
+    /// before reaching the codec.
+    #[inline]
+    pub fn with_max_frame_size(max_frame_size: usize) -> Self {
+        Self::assert_frame_size(max_frame_size);
         Self {
             max_frame_size,
             validation: ValidationLimits {
@@ -87,8 +108,8 @@ impl TunnelCodec {
 
     /// Create a new codec instance from configured resource limits.
     ///
-    /// The configured limits also bound the cardinality and per-element size of
-    /// control-frame contents enforced during [`Decoder::decode`].
+    /// Both the byte budget and the per-field cardinality/element-size bounds
+    /// enforced during [`Decoder::decode`] are derived from `limits`.
     ///
     /// # Panics
     ///
@@ -96,13 +117,14 @@ impl TunnelCodec {
     /// wire length prefix; see [`TunnelCodec::with_max_frame_size`].
     #[inline]
     pub fn from_limits(limits: &LimitsConfig) -> Self {
-        let max_frame_size = match usize::try_from(limits.max_frame_bytes) {
-            Ok(max_frame_size) => max_frame_size,
-            Err(error) => panic!("max frame size must fit in usize: {error}"),
+        let Ok(max_frame_size) = usize::try_from(limits.max_frame_bytes) else {
+            panic!("max frame size must fit in usize")
         };
-        let mut codec = Self::with_max_frame_size(max_frame_size);
-        codec.validation = ValidationLimits::from(limits);
-        codec
+        Self::assert_frame_size(max_frame_size);
+        Self {
+            max_frame_size,
+            validation: ValidationLimits::from(limits),
+        }
     }
 
     /// Get the configured max frame size
@@ -387,6 +409,32 @@ mod tests {
             protocol: crate::frame::Protocol::HTTP,
             metadata,
         };
+
+        let mut buf = BytesMut::new();
+        codec
+            .encode(frame, &mut buf)
+            .expect("encode fits in frame size");
+
+        let err = codec.decode(&mut buf).expect_err("decode must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("validation"));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_openstream_headers() {
+        // An `OpenStream` that fits the frame-size budget but carries an abusive
+        // number of headers must be rejected by the decode path.
+        let mut codec = TunnelCodec::new();
+        let headers = (0..1000)
+            .map(|i| (format!("h{i}"), "v".to_string()))
+            .collect();
+        let frame = Frame::OpenStream(Box::new(crate::frame::OpenStreamFrame {
+            stream_id: 1,
+            protocol: crate::frame::Protocol::HTTP,
+            headers,
+            body_hint: None,
+            priority: crate::frame::StreamPriority::default(),
+        }));
 
         let mut buf = BytesMut::new();
         codec

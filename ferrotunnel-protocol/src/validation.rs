@@ -1,6 +1,6 @@
 //! Frame validation for security hardening
 
-use crate::frame::{Frame, OpenStreamFrame};
+use crate::frame::{CloseReason, Frame, OpenStreamFrame};
 use ferrotunnel_common::LimitsConfig;
 use std::collections::HashMap;
 
@@ -29,6 +29,21 @@ pub enum ValidationError {
     FieldTooLong { len: usize, limit: usize },
 }
 
+/// Default cardinality and per-element size floors for control-frame contents.
+///
+/// These are fixed security floors for this release rather than operator-tunable
+/// knobs: `LimitsConfig` exposes only the frame/session budgets, and these
+/// per-field bounds are derived from those plus the constants below. Promoting
+/// them to `LimitsConfig` is deferred to the public-API-surface work in a later
+/// milestone.
+const DEFAULT_MAX_METADATA_ENTRIES: usize = 64;
+const DEFAULT_MAX_NAME_LEN: usize = 256;
+const DEFAULT_MAX_METADATA_VALUE_LEN: usize = 1024;
+const DEFAULT_MAX_HEADERS: usize = 128;
+const DEFAULT_MAX_HEADER_LEN: usize = 8 * 1024;
+const DEFAULT_MAX_ERROR_MESSAGE_LEN: usize = 4 * 1024;
+const DEFAULT_MAX_URL_LEN: usize = 2 * 1024;
+
 /// Validation limits
 ///
 /// The wire length-prefix already caps the encoded size of a frame at
@@ -36,6 +51,11 @@ pub enum ValidationError {
 /// *per-element size* of variable-length frame contents, so that a frame which
 /// fits the byte budget cannot still force allocation amplification (for
 /// example a `Register` packed with many tiny metadata entries).
+///
+/// The `max_frame_bytes`, `max_payload_bytes`, `max_token_len`,
+/// `max_capabilities`, and `max_capability_len` fields track `LimitsConfig`; the
+/// remaining per-field bounds are fixed defaults (see the `DEFAULT_MAX_*`
+/// constants) applied uniformly regardless of the configured frame budget.
 #[derive(Debug, Clone, Copy)]
 pub struct ValidationLimits {
     pub max_frame_bytes: u64,
@@ -73,13 +93,13 @@ impl From<&LimitsConfig> for ValidationLimits {
             max_capabilities: limits.max_capabilities,
             max_capability_len: limits.max_capability_len,
             max_payload_bytes: usize::try_from(limits.max_frame_bytes).unwrap_or(usize::MAX),
-            max_metadata_entries: limits.max_capabilities.max(64),
-            max_name_len: 256,
-            max_metadata_value_len: 1024,
-            max_headers: 128,
-            max_header_len: 8 * 1024,
-            max_error_message_len: 4 * 1024,
-            max_url_len: 2 * 1024,
+            max_metadata_entries: DEFAULT_MAX_METADATA_ENTRIES,
+            max_name_len: DEFAULT_MAX_NAME_LEN,
+            max_metadata_value_len: DEFAULT_MAX_METADATA_VALUE_LEN,
+            max_headers: DEFAULT_MAX_HEADERS,
+            max_header_len: DEFAULT_MAX_HEADER_LEN,
+            max_error_message_len: DEFAULT_MAX_ERROR_MESSAGE_LEN,
+            max_url_len: DEFAULT_MAX_URL_LEN,
         }
     }
 }
@@ -176,8 +196,10 @@ fn validate_payload(len: usize, limits: &ValidationLimits) -> Result<(), Validat
 
 /// Validate a decoded frame against limits.
 ///
-/// Every variant carrying variable-length content is bounded on cardinality and
-/// per-element size; variants with only fixed-size fields are always accepted.
+/// Every variant carrying variable-length content — including the `String`
+/// payload of `CloseReason::Error` inside `CloseStream` — is bounded on
+/// cardinality and per-element size; variants whose fields are all fixed-size
+/// are always accepted.
 pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), ValidationError> {
     match frame {
         Frame::Handshake(handshake) => validate_handshake(handshake, limits),
@@ -198,6 +220,10 @@ pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), Va
         Frame::Error { message, .. } => {
             check_field_len(message.len(), limits.max_error_message_len)
         }
+        Frame::CloseStream {
+            reason: CloseReason::Error(message),
+            ..
+        } => check_field_len(message.len(), limits.max_error_message_len),
         Frame::PluginData { plugin_id, data } => {
             check_field_len(plugin_id.len(), limits.max_name_len)?;
             validate_payload(data.len(), limits)
@@ -303,5 +329,28 @@ mod tests {
             validate_frame(&frame, &limits),
             Err(ValidationError::FieldTooLong { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_close_stream_with_oversized_error_reason() {
+        let limits = ValidationLimits::default();
+        let frame = Frame::CloseStream {
+            stream_id: 1,
+            reason: CloseReason::Error("x".repeat(limits.max_error_message_len + 1)),
+        };
+        assert!(matches!(
+            validate_frame(&frame, &limits),
+            Err(ValidationError::FieldTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_close_stream_without_error_reason() {
+        let limits = ValidationLimits::default();
+        let frame = Frame::CloseStream {
+            stream_id: 1,
+            reason: CloseReason::Normal,
+        };
+        assert!(validate_frame(&frame, &limits).is_ok());
     }
 }

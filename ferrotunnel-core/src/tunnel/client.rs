@@ -52,6 +52,8 @@ impl TunnelClient {
         self
     }
 
+    /// Set the resource limits used to build the frame codec (frame size and
+    /// control-frame validation bounds).
     #[must_use]
     pub fn with_limits(mut self, limits: LimitsConfig) -> Self {
         self.limits_config = limits;

@@ -355,7 +355,10 @@ impl ClientBuilder {
         self
     }
 
-    /// Configure resource limits.
+    /// Configure resource limits (frame size, session, and stream bounds).
+    ///
+    /// Defaults to [`LimitsConfig::default`]. A `max_frame_bytes` of `0` or a
+    /// value larger than `u32::MAX` is rejected by [`ClientBuilder::build`].
     #[must_use]
     pub fn limits(mut self, limits: &LimitsConfig) -> Self {
         self.config.limits = limits.clone();
