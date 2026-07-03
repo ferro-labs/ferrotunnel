@@ -6,6 +6,7 @@
 use ferrotunnel_common::{
     LimitsConfig, Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR, DEFAULT_TUNNEL_PORT,
 };
+use ferrotunnel_core::validate_limits;
 use std::net::SocketAddr;
 #[cfg(feature = "http3")]
 use std::path::PathBuf;
@@ -139,20 +140,6 @@ impl Default for ServerConfig {
     }
 }
 
-fn validate_limits(limits: &LimitsConfig) -> Result<()> {
-    if limits.max_frame_bytes == 0 {
-        return Err(TunnelError::Config(
-            "limits.max_frame_bytes must be greater than zero".into(),
-        ));
-    }
-    if limits.max_frame_bytes > u64::from(u32::MAX) {
-        return Err(TunnelError::Config(
-            "limits.max_frame_bytes must fit in the wire length prefix".into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Information about an established tunnel connection.
 #[derive(Debug, Clone)]
 pub struct TunnelInfo {
@@ -214,9 +201,10 @@ mod tests {
             local_addr: "127.0.0.1:8080".to_string(),
             ..Default::default()
         };
-        config.limits.max_frame_bytes = u64::from(u32::MAX) + 1;
+        // Just above the protocol frame ceiling (16 MiB) is now rejected.
+        config.limits.max_frame_bytes = 17 * 1024 * 1024;
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("wire length prefix"));
+        assert!(err.to_string().contains("max_frame_bytes"));
     }
 
     #[test]
@@ -293,9 +281,10 @@ mod tests {
             token: "secret-token".to_string(),
             ..Default::default()
         };
-        config.limits.max_frame_bytes = u64::from(u32::MAX) + 1;
+        // Just above the protocol frame ceiling (16 MiB) is now rejected.
+        config.limits.max_frame_bytes = 17 * 1024 * 1024;
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("wire length prefix"));
+        assert!(err.to_string().contains("max_frame_bytes"));
     }
 
     #[test]

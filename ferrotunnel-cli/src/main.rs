@@ -41,13 +41,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // rustls 0.23 requires explicitly installing the crypto provider before any
-    // TLS connection is attempted. The `ring` feature makes the provider
-    // available but does NOT auto-install it (see ferro-labs/ferrotunnel#98).
-    // We ignore the Err case because install_default() fails only when another
-    // provider has already been installed (e.g. in tests), which is fine.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
+    // The rustls crypto provider is installed on demand by the library's TLS
+    // setup (`ferrotunnel-core` transport and the HTTP/3 ingress) before any TLS
+    // config is built, so the CLI does not install it here.
     let cli = Cli::parse();
 
     match cli.command {

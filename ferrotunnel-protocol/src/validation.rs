@@ -194,12 +194,27 @@ fn validate_payload(len: usize, limits: &ValidationLimits) -> Result<(), Validat
     Ok(())
 }
 
+/// Validate the only variable-length `CloseReason`; other reasons are fixed-size.
+fn validate_close_reason(
+    reason: &CloseReason,
+    limits: &ValidationLimits,
+) -> Result<(), ValidationError> {
+    match reason {
+        CloseReason::Error(message) => check_field_len(message.len(), limits.max_error_message_len),
+        CloseReason::Normal
+        | CloseReason::Timeout
+        | CloseReason::LocalServiceUnreachable
+        | CloseReason::ProtocolViolation => Ok(()),
+    }
+}
+
 /// Validate a decoded frame against limits.
 ///
-/// Every variant carrying variable-length content — including the `String`
-/// payload of `CloseReason::Error` inside `CloseStream` — is bounded on
-/// cardinality and per-element size; variants whose fields are all fixed-size
-/// are always accepted.
+/// The match is exhaustive (no wildcard) so that adding a `Frame` or
+/// `CloseReason` variant fails to compile until a validation decision is made
+/// here. Variants carrying variable-length content are bounded on cardinality
+/// and per-element size; variants whose fields are all fixed-size accept
+/// unconditionally.
 pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), ValidationError> {
     match frame {
         Frame::Handshake(handshake) => validate_handshake(handshake, limits),
@@ -207,28 +222,25 @@ pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), Va
             server_capabilities,
             ..
         } => validate_capabilities(server_capabilities, limits),
-        Frame::RegisterAck { public_url, .. } => {
-            check_field_len(public_url.len(), limits.max_url_len)
-        }
-        Frame::Data { data, .. } => validate_payload(data.len(), limits),
         Frame::Register {
             service_name,
             metadata,
             ..
         } => validate_register(service_name, metadata, limits),
+        Frame::RegisterAck { public_url, .. } => {
+            check_field_len(public_url.len(), limits.max_url_len)
+        }
         Frame::OpenStream(open) => validate_open_stream(open, limits),
+        Frame::Data { data, .. } => validate_payload(data.len(), limits),
+        Frame::CloseStream { reason, .. } => validate_close_reason(reason, limits),
         Frame::Error { message, .. } => {
             check_field_len(message.len(), limits.max_error_message_len)
         }
-        Frame::CloseStream {
-            reason: CloseReason::Error(message),
-            ..
-        } => check_field_len(message.len(), limits.max_error_message_len),
         Frame::PluginData { plugin_id, data } => {
             check_field_len(plugin_id.len(), limits.max_name_len)?;
             validate_payload(data.len(), limits)
         }
-        _ => Ok(()),
+        Frame::StreamAck { .. } | Frame::Heartbeat { .. } | Frame::HeartbeatAck { .. } => Ok(()),
     }
 }
 

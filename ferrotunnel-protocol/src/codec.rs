@@ -61,14 +61,14 @@ impl TunnelCodec {
         Self::default()
     }
 
-    /// Enforce the wire-size contract shared by every constructor.
+    /// Enforce the frame-size contract shared by every constructor.
     ///
     /// # Panics
     ///
-    /// Panics if `max_frame_size` is zero or does not fit in the `u32` wire
-    /// length prefix. This is a programmer-error contract: configured limits
-    /// coming from user input are validated (and rejected with an error) at the
-    /// configuration boundary before reaching the codec.
+    /// Panics if `max_frame_size` is zero or exceeds [`MAX_FRAME_SIZE`]. This is
+    /// a programmer-error contract: configured limits coming from user input are
+    /// validated (and rejected with an error) at the configuration boundary
+    /// before reaching the codec.
     #[inline]
     fn assert_frame_size(max_frame_size: usize) {
         assert!(
@@ -76,8 +76,8 @@ impl TunnelCodec {
             "max frame size must be greater than zero"
         );
         assert!(
-            u32::try_from(max_frame_size).is_ok(),
-            "max frame size must fit in the wire length prefix"
+            max_frame_size <= MAX_FRAME_SIZE as usize,
+            "max frame size must not exceed MAX_FRAME_SIZE"
         );
     }
 
@@ -89,10 +89,10 @@ impl TunnelCodec {
     ///
     /// # Panics
     ///
-    /// Panics if `max_frame_size` is zero or does not fit in the `u32` wire
-    /// length prefix. This is a programmer-error contract: user-supplied limits
-    /// are validated and rejected with an error at the configuration boundary
-    /// before reaching the codec.
+    /// Panics if `max_frame_size` is zero or exceeds [`MAX_FRAME_SIZE`], the
+    /// protocol frame ceiling. This is a programmer-error contract: user-supplied
+    /// limits are validated and rejected with an error at the configuration
+    /// boundary before reaching the codec.
     #[inline]
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
         Self::assert_frame_size(max_frame_size);
@@ -113,8 +113,8 @@ impl TunnelCodec {
     ///
     /// # Panics
     ///
-    /// Panics if `limits.max_frame_bytes` is zero or does not fit in the `u32`
-    /// wire length prefix; see [`TunnelCodec::with_max_frame_size`].
+    /// Panics if `limits.max_frame_bytes` is zero or exceeds [`MAX_FRAME_SIZE`];
+    /// see [`TunnelCodec::with_max_frame_size`].
     #[inline]
     pub fn from_limits(limits: &LimitsConfig) -> Self {
         let Ok(max_frame_size) = usize::try_from(limits.max_frame_bytes) else {
@@ -223,12 +223,24 @@ impl TunnelCodec {
 const CONTROL_DECODE_HEADROOM: usize = 64 * 1024;
 
 /// Decode a bincode-encoded control frame with a fixed allocation limit.
+///
+/// Rejects a payload with trailing bytes after the bincode-encoded frame: a
+/// well-formed control frame consumes its entire body.
 #[inline]
 fn decode_control_frame_with<const LIMIT: usize>(bytes: &[u8]) -> Result<Frame, io::Error> {
     let config = bincode_next::config::standard().with_limit::<LIMIT>();
-    bincode_next::serde::decode_from_slice::<Frame, _>(bytes, config)
-        .map(|(frame, _)| frame)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}")))
+    let (frame, consumed) = bincode_next::serde::decode_from_slice::<Frame, _>(bytes, config)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}")))?;
+    if consumed != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Trailing bytes after control frame: consumed {consumed} of {}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(frame)
 }
 
 /// Decode a bincode control frame with the allocation budget bounded to the
@@ -529,6 +541,30 @@ mod tests {
             err.to_string().contains("LimitExceeded"),
             "expected allocation limit to fire before reading, got: {err}"
         );
+    }
+
+    #[test]
+    fn decode_rejects_control_frame_with_trailing_bytes() {
+        // Encode a valid control frame, then append a byte inside the framed
+        // length so the bincode payload has trailing data. Decode must reject it.
+        let mut codec = TunnelCodec::new();
+        let mut buf = BytesMut::new();
+        codec
+            .encode(Frame::Heartbeat { timestamp: 7 }, &mut buf)
+            .expect("encode");
+
+        // Splice one extra payload byte in and bump the length prefix by one.
+        let mut tampered = buf.to_vec();
+        let new_len = u32::from_be_bytes([tampered[0], tampered[1], tampered[2], tampered[3]]) + 1;
+        tampered[0..4].copy_from_slice(&new_len.to_be_bytes());
+        tampered.push(0xFF);
+        let mut framed = BytesMut::from(&tampered[..]);
+
+        let err = codec
+            .decode(&mut framed)
+            .expect_err("trailing bytes must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Trailing bytes"));
     }
 
     #[test]

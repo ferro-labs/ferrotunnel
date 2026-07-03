@@ -186,6 +186,7 @@ impl TunnelServer {
     }
 
     pub async fn run(mut self) -> Result<()> {
+        crate::limits::validate_limits(&self.limits_config)?;
         let listener = TcpListener::bind(self.addr).await?;
         info!("Server listening on {}", self.addr);
 
@@ -459,6 +460,7 @@ impl TunnelServer {
     /// This is separate from `run()` which uses TCP. Both can run simultaneously
     /// on different ports.
     pub async fn run_quic(mut self, quic_addr: SocketAddr) -> Result<()> {
+        crate::limits::validate_limits(&self.limits_config)?;
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {

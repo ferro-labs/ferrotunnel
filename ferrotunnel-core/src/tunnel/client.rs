@@ -163,6 +163,7 @@ impl TunnelClient {
         Fut: Future<Output = ()> + Send + 'static,
         C: FnOnce(Uuid) + Send + 'static,
     {
+        crate::limits::validate_limits(&self.limits_config)?;
         validate_token_format(&self.auth_token, 256)
             .map_err(|e| TunnelError::Authentication(format!("Invalid token: {e}")))?;
 
@@ -206,6 +207,7 @@ impl TunnelClient {
         Fut: Future<Output = ()> + Send + 'static,
         C: FnOnce(Uuid) + Send + 'static,
     {
+        crate::limits::validate_limits(&self.limits_config)?;
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {

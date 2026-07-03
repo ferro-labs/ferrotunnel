@@ -53,10 +53,6 @@ bytes = { workspace = true }
 # Memory allocator
 mimalloc = { workspace = true }
 
-# TLS crypto provider — must be explicitly installed as process default
-# before any rustls ClientConfig/ServerConfig is built (see issue #98)
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-
 [features]
 http3 = ["ferrotunnel-http/http3"]
 quic = ["ferrotunnel-core/quic"]
