@@ -20,8 +20,9 @@
 //! ```
 
 use crate::config::ServerConfig;
-use ferrotunnel_common::config::TlsConfig;
+use ferrotunnel_common::config::{LimitsConfig, TlsConfig};
 use ferrotunnel_common::{Result, TunnelError};
+use ferrotunnel_core::resource_limits::ServerResourceLimits;
 use ferrotunnel_core::transport::{tls::TlsTransportConfig, TransportConfig};
 use ferrotunnel_core::TunnelServer;
 use ferrotunnel_http::HttpIngress;
@@ -117,8 +118,16 @@ impl Server {
 
         #[cfg(feature = "quic")]
         let tunnel_transport = transport_config.clone();
-        let tunnel_server =
-            TunnelServer::new(config.bind_addr, config.token).with_transport(transport_config);
+        let tunnel_limits = config.limits.clone();
+        let resource_limits = ServerResourceLimits::new(
+            tunnel_limits.max_sessions,
+            tunnel_limits.max_streams_per_session,
+            tunnel_limits.max_inflight_frames,
+        );
+        let tunnel_server = TunnelServer::new(config.bind_addr, config.token)
+            .with_transport(transport_config)
+            .with_limits(tunnel_limits)
+            .with_resource_limits(resource_limits);
 
         // Initialize plugins
         let mut registry = PluginRegistry::new();
@@ -354,6 +363,13 @@ impl ServerBuilder {
         self
     }
 
+    /// Configure resource limits.
+    #[must_use]
+    pub fn limits(mut self, limits: &LimitsConfig) -> Self {
+        self.config.limits = limits.clone();
+        self
+    }
+
     /// Configure QUIC transport for the server.
     ///
     /// When enabled, the server will accept QUIC connections for the tunnel control plane.
@@ -406,6 +422,10 @@ mod tests {
             .bind("0.0.0.0:9000".parse().unwrap())
             .http_bind("0.0.0.0:9001".parse().unwrap())
             .token("my-token")
+            .limits(&LimitsConfig {
+                max_frame_bytes: 4096,
+                ..Default::default()
+            })
             .build()
             .expect("should build successfully");
 
@@ -415,6 +435,7 @@ mod tests {
             "0.0.0.0:9001".parse().unwrap()
         );
         assert_eq!(server.config().token, "my-token");
+        assert_eq!(server.config().limits.max_frame_bytes, 4096);
     }
 
     #[test]

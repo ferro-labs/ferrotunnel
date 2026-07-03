@@ -1,6 +1,7 @@
 //! Frame validation for security hardening
 
 use crate::frame::Frame;
+use ferrotunnel_common::LimitsConfig;
 
 /// Validation errors
 #[derive(Debug, thiserror::Error)]
@@ -33,12 +34,18 @@ pub struct ValidationLimits {
 
 impl Default for ValidationLimits {
     fn default() -> Self {
+        Self::from(&LimitsConfig::default())
+    }
+}
+
+impl From<&LimitsConfig> for ValidationLimits {
+    fn from(limits: &LimitsConfig) -> Self {
         Self {
-            max_frame_bytes: 16 * 1024 * 1024,
-            max_token_len: 256,
-            max_capabilities: 32,
-            max_capability_len: 64,
-            max_payload_bytes: 16 * 1024 * 1024,
+            max_frame_bytes: limits.max_frame_bytes,
+            max_token_len: limits.max_token_len,
+            max_capabilities: limits.max_capabilities,
+            max_capability_len: limits.max_capability_len,
+            max_payload_bytes: usize::try_from(limits.max_frame_bytes).unwrap_or(usize::MAX),
         }
     }
 }
@@ -96,4 +103,27 @@ pub fn validate_frame(frame: &Frame, limits: &ValidationLimits) -> Result<(), Va
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validation_limits_from_limits_config() {
+        let limits = LimitsConfig {
+            max_frame_bytes: 4096,
+            max_token_len: 32,
+            max_capabilities: 4,
+            max_capability_len: 16,
+            ..Default::default()
+        };
+        let validation = ValidationLimits::from(&limits);
+
+        assert_eq!(validation.max_frame_bytes, 4096);
+        assert_eq!(validation.max_payload_bytes, 4096);
+        assert_eq!(validation.max_token_len, 32);
+        assert_eq!(validation.max_capabilities, 4);
+        assert_eq!(validation.max_capability_len, 16);
+    }
 }

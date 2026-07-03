@@ -10,6 +10,7 @@ description = "Wire protocol for FerroTunnel reverse tunnel"
 keywords = ["protocol", "tunnel", "networking"]
 
 [dependencies]
+ferrotunnel-common = { version = "1.3.0", path = "../ferrotunnel-common" }
 serde = { workspace = true }
 bincode-next = { workspace = true }
 bytes = { workspace = true }
