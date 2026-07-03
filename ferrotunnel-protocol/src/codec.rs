@@ -9,6 +9,7 @@
 
 use crate::constants::MAX_FRAME_SIZE;
 use crate::frame::{Frame, ZeroCopyFrame};
+use crate::validation::{validate_frame, ValidationLimits};
 use bytes::{Buf, BufMut, BytesMut};
 use ferrotunnel_common::LimitsConfig;
 use std::io;
@@ -40,6 +41,7 @@ const FLAG_EOS: u8 = 0x01;
 #[derive(Debug, Clone, Copy)]
 pub struct TunnelCodec {
     max_frame_size: usize,
+    validation: ValidationLimits,
 }
 
 impl Default for TunnelCodec {
@@ -56,6 +58,13 @@ impl TunnelCodec {
     }
 
     /// Create a new codec instance with a custom max frame size
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_frame_size` is zero or does not fit in the `u32` wire
+    /// length prefix. This is a programmer-error contract: configured limits
+    /// coming from user input are validated (and rejected with an error) at the
+    /// configuration boundary before reaching the codec.
     #[inline]
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
         assert!(
@@ -66,17 +75,34 @@ impl TunnelCodec {
             u32::try_from(max_frame_size).is_ok(),
             "max frame size must fit in the wire length prefix"
         );
-        Self { max_frame_size }
+        Self {
+            max_frame_size,
+            validation: ValidationLimits {
+                max_frame_bytes: max_frame_size as u64,
+                max_payload_bytes: max_frame_size,
+                ..ValidationLimits::default()
+            },
+        }
     }
 
     /// Create a new codec instance from configured resource limits.
+    ///
+    /// The configured limits also bound the cardinality and per-element size of
+    /// control-frame contents enforced during [`Decoder::decode`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `limits.max_frame_bytes` is zero or does not fit in the `u32`
+    /// wire length prefix; see [`TunnelCodec::with_max_frame_size`].
     #[inline]
     pub fn from_limits(limits: &LimitsConfig) -> Self {
         let max_frame_size = match usize::try_from(limits.max_frame_bytes) {
             Ok(max_frame_size) => max_frame_size,
             Err(error) => panic!("max frame size must fit in usize: {error}"),
         };
-        Self::with_max_frame_size(max_frame_size)
+        let mut codec = Self::with_max_frame_size(max_frame_size);
+        codec.validation = ValidationLimits::from(limits);
+        codec
     }
 
     /// Get the configured max frame size
@@ -232,15 +258,22 @@ impl Decoder for TunnelCodec {
                 }))
             }
             FRAME_TYPE_CONTROL => {
-                // Control frame: bincode-encoded Frame
+                // Control frame: bincode-encoded Frame. The bincode limit is a
+                // compile-time absolute ceiling (`MAX_FRAME_SIZE`); runtime
+                // enforcement is the length-prefix bound checked above plus the
+                // per-variant validation below, which bounds the cardinality and
+                // per-element size of variable-length frame contents.
                 let config =
                     bincode_next::config::standard().with_limit::<{ MAX_FRAME_SIZE as usize }>();
-                let (frame, _) =
+                let (frame, _): (Frame, _) =
                     bincode_next::serde::decode_from_slice(frame_bytes.as_ref(), config).map_err(
                         |e| {
                             io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}"))
                         },
                     )?;
+                validate_frame(&frame, &self.validation).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("Frame validation: {e}"))
+                })?;
                 Ok(Some(frame))
             }
             _ => Err(io::Error::new(
@@ -338,6 +371,31 @@ mod tests {
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
 
         assert_eq!(frame, decoded);
+    }
+
+    #[test]
+    fn decode_rejects_oversized_register_metadata() {
+        // A `Register` that fits the frame-size budget but carries an abusive
+        // number of metadata entries must be rejected by the decode path.
+        let mut codec = TunnelCodec::new();
+        let mut metadata = std::collections::HashMap::new();
+        for i in 0..1000 {
+            metadata.insert(format!("k{i}"), "v".to_string());
+        }
+        let frame = Frame::Register {
+            service_name: "svc".into(),
+            protocol: crate::frame::Protocol::HTTP,
+            metadata,
+        };
+
+        let mut buf = BytesMut::new();
+        codec
+            .encode(frame, &mut buf)
+            .expect("encode fits in frame size");
+
+        let err = codec.decode(&mut buf).expect_err("decode must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("validation"));
     }
 
     #[test]
