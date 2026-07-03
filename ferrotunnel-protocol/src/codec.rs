@@ -212,6 +212,66 @@ impl TunnelCodec {
     }
 }
 
+/// Headroom added to the physical frame length when sizing the bincode decode
+/// budget.
+///
+/// bincode claims `len * size_of::<T>()` up front for a collection before
+/// decoding its elements, so a valid dense collection of small elements claims
+/// more than its wire size. This covers the largest such backbone a valid
+/// control frame can produce (`max_headers` entries in an `OpenStream`) with
+/// wide margin, so legitimate frames never trip the budget on backbone overhead.
+const CONTROL_DECODE_HEADROOM: usize = 64 * 1024;
+
+/// Decode a bincode-encoded control frame with a fixed allocation limit.
+#[inline]
+fn decode_control_frame_with<const LIMIT: usize>(bytes: &[u8]) -> Result<Frame, io::Error> {
+    let config = bincode_next::config::standard().with_limit::<LIMIT>();
+    bincode_next::serde::decode_from_slice::<Frame, _>(bytes, config)
+        .map(|(frame, _)| frame)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}")))
+}
+
+/// Decode a bincode control frame with the allocation budget bounded to the
+/// physical frame length.
+///
+/// bincode eagerly allocates for a declared string/collection length *before*
+/// confirming those bytes are present, bounded only by the configured decode
+/// limit. A fixed `MAX_FRAME_SIZE` (16 MB) limit therefore lets a physically
+/// tiny frame that declares a huge length force an allocation up to that
+/// ceiling. Since no valid frame can declare more content than its own size
+/// (plus a small, bounded collection backbone — see [`CONTROL_DECODE_HEADROOM`]),
+/// the budget is capped at the next power of two `>= bytes.len() + headroom`
+/// (a fixed ladder, as `with_limit` is const-generic). This keeps a small frame
+/// from forcing a large allocation while still accepting every valid frame;
+/// large allocations then require a proportionally large frame (no
+/// amplification). `bytes.len()` is already bounded to `max_frame_size`
+/// (`<= MAX_FRAME_SIZE`) by the caller.
+fn decode_control_frame(bytes: &[u8]) -> Result<Frame, io::Error> {
+    let budget = bytes
+        .len()
+        .saturating_add(CONTROL_DECODE_HEADROOM)
+        .checked_next_power_of_two()
+        .unwrap_or(MAX_FRAME_SIZE as usize)
+        .min(MAX_FRAME_SIZE as usize);
+    macro_rules! ladder {
+        ($($limit:expr),+ $(,)?) => {
+            match budget {
+                $(b if b <= $limit => decode_control_frame_with::<{ $limit }>(bytes),)+
+                _ => decode_control_frame_with::<{ MAX_FRAME_SIZE as usize }>(bytes),
+            }
+        };
+    }
+    ladder!(
+        1 << 17,
+        1 << 18,
+        1 << 19,
+        1 << 20,
+        1 << 21,
+        1 << 22,
+        1 << 23,
+    )
+}
+
 impl Decoder for TunnelCodec {
     type Item = Frame;
     type Error = io::Error;
@@ -280,19 +340,13 @@ impl Decoder for TunnelCodec {
                 }))
             }
             FRAME_TYPE_CONTROL => {
-                // Control frame: bincode-encoded Frame. The bincode limit is a
-                // compile-time absolute ceiling (`MAX_FRAME_SIZE`); runtime
-                // enforcement is the length-prefix bound checked above plus the
-                // per-variant validation below, which bounds the cardinality and
-                // per-element size of variable-length frame contents.
-                let config =
-                    bincode_next::config::standard().with_limit::<{ MAX_FRAME_SIZE as usize }>();
-                let (frame, _): (Frame, _) =
-                    bincode_next::serde::decode_from_slice(frame_bytes.as_ref(), config).map_err(
-                        |e| {
-                            io::Error::new(io::ErrorKind::InvalidData, format!("Decode error: {e}"))
-                        },
-                    )?;
+                // Control frame: bincode-encoded Frame. Two layers of runtime
+                // enforcement: (1) `decode_control_frame` caps bincode's
+                // allocation budget at the physical frame length so a frame
+                // cannot force an allocation larger than its real size, and
+                // (2) `validate_frame` bounds the cardinality and per-element
+                // size of the decoded frame's variable-length contents.
+                let frame = decode_control_frame(frame_bytes.as_ref())?;
                 validate_frame(&frame, &self.validation).map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("Frame validation: {e}"))
                 })?;
@@ -444,6 +498,37 @@ mod tests {
         let err = codec.decode(&mut buf).expect_err("decode must reject");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("validation"));
+    }
+
+    #[test]
+    fn decode_bounds_allocation_to_physical_frame_size() {
+        // A 13-byte control frame that declares a 15 MB `Error` message must be
+        // rejected by bincode's allocation limit *before* it allocates, not
+        // after. The decode limit is capped at the physical frame length, so
+        // the declared length trips `LimitExceeded` rather than allocating 15 MB
+        // and then failing with `UnexpectedEnd`.
+        //
+        // Wire bytes: [len prefix = 9][type = CONTROL]
+        //   [disc 10 = Error][Option None][ErrorCode idx 0]
+        //   [message len varint = 15_000_000: 0xFC + u32 LE][no message bytes]
+        let mut buf = BytesMut::from(
+            &[
+                0x00, 0x00, 0x00, 0x09, // length prefix (BE u32) = 9
+                0x00, // FRAME_TYPE_CONTROL
+                0x0A, // enum discriminant 10 = Frame::Error
+                0x00, // stream_id: Option = None
+                0x00, // code: ErrorCode variant index 0
+                0xFC, 0xC0, 0xE1, 0xE4, 0x00, // message len = 15_000_000 (u32 marker)
+            ][..],
+        );
+
+        let mut codec = TunnelCodec::new();
+        let err = codec.decode(&mut buf).expect_err("decode must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("LimitExceeded"),
+            "expected allocation limit to fire before reading, got: {err}"
+        );
     }
 
     #[test]
