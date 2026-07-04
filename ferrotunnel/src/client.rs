@@ -433,7 +433,10 @@ fn validate_client_tls_config(config: &TlsConfig) -> Result<()> {
         ));
     }
 
-    if missing_path(config.ca_cert_path.as_ref()) {
+    // `skip_verify` disables server-certificate verification, so no CA is
+    // required (this matches what `create_client_config` accepts). Only require
+    // a CA when the server certificate will actually be verified.
+    if !config.skip_verify && missing_path(config.ca_cert_path.as_ref()) {
         return Err(TunnelError::Config(
             "client TLS requires ca_cert_path for server verification".into(),
         ));
@@ -660,6 +663,25 @@ mod tests {
             .tls(&tls)
             .build()
             .expect("server-auth TLS should not require client certificate material");
+
+        assert!(!client.config().server_addr.is_empty());
+    }
+
+    #[test]
+    fn test_client_builder_tls_skip_verify_without_ca() {
+        // `skip_verify` disables server verification, so a CA is not required;
+        // the transport supports this, so `build()` must accept it.
+        let tls = TlsConfig {
+            enabled: true,
+            skip_verify: true,
+            ..Default::default()
+        };
+        let client = Client::builder()
+            .server_addr("localhost:7835")
+            .token("secret")
+            .tls(&tls)
+            .build()
+            .expect("skip_verify TLS should not require a CA path");
 
         assert!(!client.config().server_addr.is_empty());
     }
