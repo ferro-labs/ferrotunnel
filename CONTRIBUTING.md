@@ -26,7 +26,7 @@ All contributors are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md
 ## Development Setup
 
 ### Prerequisites
-- [Rust](https://www.rust-lang.org/tools/install) (stable, version 1.90+)
+- [Rust](https://www.rust-lang.org/tools/install) (stable, version 1.91+)
 - `make` (for running development commands)
 
 ### Common Commands

@@ -16,5 +16,5 @@ pub fn run() {
 
 fn rustc_version() -> &'static str {
     // This would ideally come from build.rs, but for simplicity we use a placeholder
-    "1.90+"
+    "1.91+"
 }

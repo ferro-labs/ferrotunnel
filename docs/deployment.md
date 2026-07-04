@@ -197,7 +197,7 @@ sudo systemctl start ferrotunnel
 
 ```dockerfile
 # Dockerfile
-FROM rust:1.90-slim as builder
+FROM rust:1.91-slim as builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release -p ferrotunnel-cli

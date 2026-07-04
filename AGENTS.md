@@ -69,7 +69,7 @@ Internet → HttpIngress(:8080) → SessionStore → AnyMultiplexer → [TCP: Mu
 - **`unsafe_code = "forbid"`** at workspace level — no unsafe code
 - **Clippy pedantic** enabled; `unwrap_used` and `expect_used` warn (allowed in tests)
 - `dbg!`, `todo!`, `unimplemented!` are warnings
-- Edition 2021, MSRV 1.90, max line width 100, 4-space indent
+- Edition 2021, MSRV 1.91, max line width 100, 4-space indent
 - Use `thiserror` for library errors, `anyhow` for CLI/application errors
 - Prefer `Bytes` for zero-copy buffers, `kanal` for async channels, `DashMap` for concurrent maps
 - TLS uses `rustls` 0.23 + ring crypto provider (must call `install_default()` before any TLS config)
