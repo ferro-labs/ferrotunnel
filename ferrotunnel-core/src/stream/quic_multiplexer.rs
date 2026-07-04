@@ -123,9 +123,17 @@ impl QuicMultiplexer {
     }
 
     /// Allocate a new stream ID atomically.
-    fn allocate_stream_id(&self) -> u32 {
+    ///
+    /// Returns an error rather than wrapping past `u32::MAX` so an exhausted ID
+    /// space cannot silently alias a live stream.
+    fn allocate_stream_id(&self) -> Result<u32> {
         self.next_stream_id
-            .fetch_add(2, std::sync::atomic::Ordering::Relaxed)
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |id| id.checked_add(2),
+            )
+            .map_err(|_| TunnelError::Protocol("stream ID space exhausted".into()))
     }
 
     /// Open a new outbound data stream.
@@ -143,7 +151,7 @@ impl QuicMultiplexer {
         protocol: Protocol,
         priority: StreamPriority,
     ) -> Result<QuicVirtualStream> {
-        let stream_id = self.allocate_stream_id();
+        let stream_id = self.allocate_stream_id()?;
 
         let (mut send, recv) = self
             .connection
