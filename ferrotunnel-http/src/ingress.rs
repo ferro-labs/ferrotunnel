@@ -307,9 +307,7 @@ async fn handle_request(
     // Strip hop-by-hop headers before forwarding upstream, except for WebSocket
     // upgrades which legitimately rely on Connection/Upgrade to negotiate a 101.
     if !is_ws {
-        parts.headers.remove(hyper::header::CONNECTION);
-        parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-        parts.headers.remove(hyper::header::UPGRADE);
+        strip_hop_by_hop_headers(&mut parts.headers);
     }
 
     let mut forward_req = Request::from_parts(parts, limited_body);
@@ -818,6 +816,27 @@ fn is_websocket_upgrade(headers: &hyper::HeaderMap) -> bool {
                 .any(|s| s.trim().eq_ignore_ascii_case("upgrade"))
         });
     upgrade && connection
+}
+
+/// Remove hop-by-hop headers before forwarding a request upstream.
+///
+/// Per RFC 7230 §6.1 this strips the fixed connection-management headers plus
+/// any header named in the `Connection` header value, so a connection-scoped or
+/// smuggled header cannot leak to the upstream. Callers keep these headers for
+/// WebSocket upgrades, which legitimately negotiate over `Connection`/`Upgrade`.
+pub(crate) fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap) {
+    if let Some(connection) = headers.get(hyper::header::CONNECTION).cloned() {
+        if let Ok(value) = connection.to_str() {
+            for name in value.split(',') {
+                if let Ok(header) = hyper::header::HeaderName::from_bytes(name.trim().as_bytes()) {
+                    headers.remove(header);
+                }
+            }
+        }
+    }
+    headers.remove(hyper::header::CONNECTION);
+    headers.remove(hyper::header::TRANSFER_ENCODING);
+    headers.remove(hyper::header::UPGRADE);
 }
 
 /// Parse and normalize the Host header for secure multi-tenant routing.

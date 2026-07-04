@@ -9,7 +9,7 @@ use h3::quic::{BidiStream, RecvStream, SendStream};
 use h3_quinn::quinn::{Endpoint, ServerConfig, TransportConfig, VarInt};
 use http_body_util::BodyExt;
 use hyper::body::Frame;
-use hyper::header::{HeaderName, HeaderValue, CONNECTION, HOST, TRANSFER_ENCODING, UPGRADE};
+use hyper::header::{HeaderName, HeaderValue, HOST};
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::io;
@@ -752,7 +752,7 @@ fn build_forward_request(
 ) -> std::result::Result<Request<BoxBody>, String> {
     let (mut parts, ()) = req.into_parts();
     parts.headers.insert(HOST, host.clone());
-    remove_connection_specific_headers(&mut parts.headers);
+    crate::ingress::strip_hop_by_hop_headers(&mut parts.headers);
 
     if is_grpc {
         parts.version = hyper::Version::HTTP_2;
@@ -806,12 +806,6 @@ fn streaming_body_to_boxbody(body: Http3RequestBody) -> BoxBody {
     );
 
     StreamBody::new(frame_stream).boxed()
-}
-
-fn remove_connection_specific_headers(headers: &mut hyper::HeaderMap) {
-    headers.remove(CONNECTION);
-    headers.remove(TRANSFER_ENCODING);
-    headers.remove(UPGRADE);
 }
 
 // ---------------------------------------------------------------------------
@@ -968,7 +962,7 @@ async fn collect_upstream_body(
 fn sanitize_response_parts(
     mut parts: hyper::http::response::Parts,
 ) -> hyper::http::response::Parts {
-    remove_connection_specific_headers(&mut parts.headers);
+    crate::ingress::strip_hop_by_hop_headers(&mut parts.headers);
     parts
 }
 
