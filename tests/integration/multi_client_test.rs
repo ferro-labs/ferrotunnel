@@ -43,7 +43,8 @@ async fn test_multiple_clients() {
 
     // Verify both clients have unique session IDs
     assert_ne!(
-        info1.session_id(), info2.session_id(),
+        info1.session_id(),
+        info2.session_id(),
         "Clients should have different session IDs"
     );
 
@@ -92,7 +93,8 @@ async fn test_client_reconnect() {
 
     // New connection should have different session
     assert_ne!(
-        session1, info2.session_id(),
+        session1,
+        info2.session_id(),
         "Reconnect should get new session"
     );
 
