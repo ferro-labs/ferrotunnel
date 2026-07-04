@@ -61,14 +61,17 @@ pub struct OpenStreamFrame {
     pub priority: StreamPriority,
 }
 
-/// Handshake payload - boxed to reduce Frame enum size
+/// Handshake payload - boxed to reduce Frame enum size.
+///
+/// Invariant: `min_version <= max_version`. Frame validation rejects any
+/// handshake that violates it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HandshakeFrame {
     pub token: String,
     pub tunnel_id: Option<String>,
-    /// Minimum protocol version supported by this peer
+    /// Minimum protocol version supported by this peer (must be `<= max_version`).
     pub min_version: u8,
-    /// Maximum protocol version supported by this peer
+    /// Maximum protocol version supported by this peer (must be `>= min_version`).
     pub max_version: u8,
     pub capabilities: Vec<String>,
 }

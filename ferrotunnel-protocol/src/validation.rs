@@ -27,6 +27,9 @@ pub enum ValidationError {
 
     #[error("Field too long: {len} bytes exceeds limit of {limit} bytes")]
     FieldTooLong { len: usize, limit: usize },
+
+    #[error("Invalid version range: min_version {min} exceeds max_version {max}")]
+    InvalidVersionRange { min: u8, max: u8 },
 }
 
 /// Default cardinality and per-element size floors for control-frame contents.
@@ -154,6 +157,12 @@ fn validate_handshake(
     }
     if let Some(tunnel_id) = &handshake.tunnel_id {
         check_field_len(tunnel_id.len(), limits.max_name_len)?;
+    }
+    if handshake.min_version > handshake.max_version {
+        return Err(ValidationError::InvalidVersionRange {
+            min: handshake.min_version,
+            max: handshake.max_version,
+        });
     }
     validate_capabilities(&handshake.capabilities, limits)
 }
@@ -340,6 +349,22 @@ mod tests {
         assert!(matches!(
             validate_frame(&frame, &limits),
             Err(ValidationError::FieldTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_handshake_with_inverted_version_range() {
+        let limits = ValidationLimits::default();
+        let frame = Frame::Handshake(Box::new(crate::frame::HandshakeFrame {
+            token: "t".into(),
+            tunnel_id: None,
+            min_version: 2,
+            max_version: 1,
+            capabilities: Vec::new(),
+        }));
+        assert!(matches!(
+            validate_frame(&frame, &limits),
+            Err(ValidationError::InvalidVersionRange { min: 2, max: 1 })
         ));
     }
 

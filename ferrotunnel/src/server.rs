@@ -69,6 +69,7 @@ impl Server {
     ///     .build()
     ///     .unwrap();
     /// ```
+    #[must_use]
     pub fn builder() -> ServerBuilder {
         ServerBuilder::default()
     }

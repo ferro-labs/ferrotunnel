@@ -69,6 +69,7 @@ impl Client {
     ///     .build()
     ///     .unwrap();
     /// ```
+    #[must_use]
     pub fn builder() -> ClientBuilder {
         ClientBuilder::default()
     }
