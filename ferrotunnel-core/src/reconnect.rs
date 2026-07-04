@@ -78,7 +78,7 @@ impl Backoff {
 
         // Apply jitter
         let jitter_range = exp_delay * self.config.jitter;
-        let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
+        let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
         let delay_with_jitter = (exp_delay + jitter).max(0.0);
 
         // Clamp to max

@@ -154,7 +154,15 @@ registries = [
 # More documentation about the 'bans' section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 [bans]
-# Lint level for when multiple versions of the same crate are detected
+# Lint level for when multiple versions of the same crate are detected.
+# Kept at "warn" rather than "deny" on purpose: the remaining duplicates are
+# transitive (e.g. thiserror 1.x pulled by upstream crates, and the
+# windows-sys/windows-targets family required by the async runtime and TLS
+# stack) and are outside our direct control. Failing the build on them would
+# block releases for reasons we cannot fix. They stay visible as warnings so
+# newly introduced, avoidable duplicates remain easy to spot. Avoidable
+# duplicates from our own direct dependencies are unified in the manifests
+# instead (e.g. rand is pinned to 0.9 to match governor's transitive rand).
 multiple-versions = "warn"
 # Lint level for when a crate version requirement is `*`
 wildcards = "allow"
