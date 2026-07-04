@@ -88,7 +88,12 @@ where
             }
 
             let request_method = parts.method.to_string();
-            let request_path = parts.uri.path().to_string();
+            // Capture the full path and query so a replayed request matches the
+            // original; `uri.path()` alone would drop the query string.
+            let request_path = parts
+                .uri
+                .path_and_query()
+                .map_or_else(|| parts.uri.path().to_string(), |pq| pq.as_str().to_string());
 
             let request_bytes = match body.collect().await {
                 Ok(c) => c.to_bytes(),
