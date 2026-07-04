@@ -13,7 +13,7 @@
 //!     .build()?;
 //!
 //! let info = client.start().await?;
-//! println!("Connected! Session: {:?}", info.session_id);
+//! println!("Connected! Session: {:?}", info.session_id());
 //! # Ok(())
 //! # }
 //! ```

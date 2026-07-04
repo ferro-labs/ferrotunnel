@@ -70,7 +70,7 @@ async fn test_websocket_upgrade_through_tunnel() {
 
     let info = client.start().await.expect("Client failed to connect");
     let session_id = info
-        .session_id
+        .session_id()
         .expect("Session ID should be present")
         .to_string();
 
@@ -166,7 +166,7 @@ async fn test_websocket_raw_upgrade_101() {
 
     let info = client.start().await.expect("Client failed to connect");
     let session_id = info
-        .session_id
+        .session_id()
         .expect("Session ID should be present")
         .to_string();
 
@@ -270,7 +270,7 @@ async fn test_websocket_subprotocol_preserved() {
         .expect("Failed to build client");
 
     let info = client.start().await.expect("Client failed to connect");
-    let session_id = info.session_id.unwrap().to_string();
+    let session_id = info.session_id().unwrap().to_string();
 
     let ws_url = format!("ws://127.0.0.1:{http_port}/ws");
     let mut request = ws_url.into_client_request().unwrap();
@@ -323,7 +323,7 @@ async fn test_websocket_multiple_concurrent_streams() {
         .expect("Failed to build client");
 
     let info = client.start().await.expect("Client failed to connect");
-    let session_id = info.session_id.unwrap().to_string();
+    let session_id = info.session_id().unwrap().to_string();
 
     let mut handles = Vec::new();
     for i in 0..10 {
@@ -415,7 +415,7 @@ async fn test_websocket_failed_upgrade_404() {
         .expect("Failed to build client");
 
     let info = client.start().await.expect("Client failed to connect");
-    let session_id = info.session_id.unwrap().to_string();
+    let session_id = info.session_id().unwrap().to_string();
 
     let ws_url = format!("ws://127.0.0.1:{http_port}/ws");
     let mut request =

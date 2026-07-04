@@ -27,7 +27,7 @@ async fn test_concurrent_requests() {
         .expect("Failed to build client");
 
     let info = client.start().await.expect("Client failed to connect");
-    let session_id = info.session_id.expect("Session ID required").to_string();
+    let session_id = info.session_id().expect("Session ID required").to_string();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

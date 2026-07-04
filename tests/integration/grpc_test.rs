@@ -111,7 +111,7 @@ async fn test_grpc_tunnel() {
 
     let info = client.start().await.expect("Client failed to connect");
     let session_id = info
-        .session_id
+        .session_id()
         .expect("Session ID should be present")
         .to_string();
 
@@ -257,7 +257,7 @@ async fn test_non_grpc_not_classified_as_grpc() {
 
     let info = client.start().await.expect("Client failed to connect");
     let session_id = info
-        .session_id
+        .session_id()
         .expect("Session ID should be present")
         .to_string();
 
