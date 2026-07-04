@@ -751,8 +751,10 @@ fn build_forward_request(
     is_grpc: bool,
 ) -> std::result::Result<Request<BoxBody>, String> {
     let (mut parts, ()) = req.into_parts();
-    parts.headers.insert(HOST, host.clone());
+    // Sanitize hop-by-hop headers first, then insert the trusted canonical Host
+    // so a client-supplied `Connection: host` cannot drop it.
     crate::ingress::strip_hop_by_hop_headers(&mut parts.headers);
+    parts.headers.insert(HOST, host.clone());
 
     if is_grpc {
         parts.version = hyper::Version::HTTP_2;

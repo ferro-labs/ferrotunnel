@@ -825,18 +825,31 @@ fn is_websocket_upgrade(headers: &hyper::HeaderMap) -> bool {
 /// smuggled header cannot leak to the upstream. Callers keep these headers for
 /// WebSocket upgrades, which legitimately negotiate over `Connection`/`Upgrade`.
 pub(crate) fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap) {
+    // Remove any header named in the `Connection` value (RFC 7230 §6.1), except
+    // `Host`: it is end-to-end and required for strict host-based forwarding, so
+    // a `Connection: host` token must not be able to drop it.
     if let Some(connection) = headers.get(hyper::header::CONNECTION).cloned() {
         if let Ok(value) = connection.to_str() {
             for name in value.split(',') {
-                if let Ok(header) = hyper::header::HeaderName::from_bytes(name.trim().as_bytes()) {
+                let name = name.trim();
+                if name.is_empty() || name.eq_ignore_ascii_case("host") {
+                    continue;
+                }
+                if let Ok(header) = hyper::header::HeaderName::from_bytes(name.as_bytes()) {
                     headers.remove(header);
                 }
             }
         }
     }
+    // Remove the standard hop-by-hop headers.
     headers.remove(hyper::header::CONNECTION);
     headers.remove(hyper::header::TRANSFER_ENCODING);
     headers.remove(hyper::header::UPGRADE);
+    headers.remove(hyper::header::TE);
+    headers.remove(hyper::header::TRAILER);
+    headers.remove(hyper::header::PROXY_AUTHENTICATE);
+    headers.remove(hyper::header::PROXY_AUTHORIZATION);
+    headers.remove(hyper::header::HeaderName::from_static("keep-alive"));
 }
 
 /// Parse and normalize the Host header for secure multi-tenant routing.
@@ -1072,6 +1085,52 @@ mod tests {
         headers.insert(hyper::header::UPGRADE, "websocket".parse().unwrap());
         headers.insert(hyper::header::CONNECTION, "Upgrade".parse().unwrap());
         assert!(is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn strip_hop_by_hop_headers_removes_hop_by_hop_but_keeps_host() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(hyper::header::HOST, "tenant.example".parse().unwrap());
+        headers.insert(
+            hyper::header::CONNECTION,
+            "keep-alive, host, x-smuggle".parse().unwrap(),
+        );
+        headers.insert(hyper::header::TE, "trailers".parse().unwrap());
+        headers.insert(hyper::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        headers.insert(
+            hyper::header::HeaderName::from_static("x-smuggle"),
+            "1".parse().unwrap(),
+        );
+        headers.insert(
+            hyper::header::HeaderName::from_static("keep-alive"),
+            "timeout=5".parse().unwrap(),
+        );
+        headers.insert(
+            hyper::header::HeaderName::from_static("x-end-to-end"),
+            "keep".parse().unwrap(),
+        );
+
+        strip_hop_by_hop_headers(&mut headers);
+
+        // Host survives even though it is named in Connection.
+        assert_eq!(headers.get(hyper::header::HOST).unwrap(), "tenant.example");
+        // A genuine end-to-end header is untouched.
+        assert_eq!(
+            headers
+                .get(hyper::header::HeaderName::from_static("x-end-to-end"))
+                .unwrap(),
+            "keep"
+        );
+        // Connection-listed and standard hop-by-hop headers are removed.
+        assert!(headers.get(hyper::header::CONNECTION).is_none());
+        assert!(headers.get(hyper::header::TE).is_none());
+        assert!(headers.get(hyper::header::TRANSFER_ENCODING).is_none());
+        assert!(headers
+            .get(hyper::header::HeaderName::from_static("x-smuggle"))
+            .is_none());
+        assert!(headers
+            .get(hyper::header::HeaderName::from_static("keep-alive"))
+            .is_none());
     }
 
     #[test]
