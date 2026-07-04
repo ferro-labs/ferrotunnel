@@ -23,7 +23,7 @@ use tracing::{error, info, warn};
 
 const H3_ALPN: &[u8] = b"h3";
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+type BoxBody = http_body_util::combinators::BoxBody<Bytes, io::Error>;
 
 // Section 12.5: #[non_exhaustive] for semver-safe config evolution.
 // Construct via `Http3IngressConfig::default()` + struct update syntax.
@@ -789,12 +789,15 @@ fn streaming_body_to_boxbody(body: Http3RequestBody) -> BoxBody {
 
     let mut body = body;
     let frame_stream = poll_fn(
-        move |cx| -> Poll<Option<std::result::Result<Frame<Bytes>, hyper::Error>>> {
+        move |cx| -> Poll<Option<std::result::Result<Frame<Bytes>, io::Error>>> {
             match Pin::new(&mut body).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+                // Propagate the read error instead of converting it to a clean
+                // EOF, so the upstream sees a failed request body rather than a
+                // silently truncated one.
                 Poll::Ready(Some(Err(e))) => {
                     error!("HTTP/3 request body error: {e}");
-                    Poll::Ready(None)
+                    Poll::Ready(Some(Err(e)))
                 }
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,

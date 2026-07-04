@@ -304,6 +304,14 @@ async fn handle_request(
         Arc::clone(&body_oversized),
     )
     .boxed();
+    // Strip hop-by-hop headers before forwarding upstream, except for WebSocket
+    // upgrades which legitimately rely on Connection/Upgrade to negotiate a 101.
+    if !is_ws {
+        parts.headers.remove(hyper::header::CONNECTION);
+        parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+        parts.headers.remove(hyper::header::UPGRADE);
+    }
+
     let mut forward_req = Request::from_parts(parts, limited_body);
 
     // HTTP/2 (gRPC) requires an absolute URI (scheme + authority).
@@ -571,7 +579,33 @@ async fn handle_request(
         .execute_response_hooks(&mut proxy_res, &response_ctx)
         .await
     {
-        Ok(PluginAction::Continue | _) => {}
+        // Continue and Modify proceed with the (possibly in-place modified)
+        // response. Matching Reject and Respond exhaustively means a
+        // response-plugin decision is honored instead of silently dropped.
+        Ok(PluginAction::Continue | PluginAction::Modify { .. }) => {}
+        Ok(PluginAction::Reject { status, reason }) => {
+            return Ok(full_response(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+                &reason,
+            ));
+        }
+        Ok(PluginAction::Respond {
+            status,
+            headers,
+            body,
+        }) => {
+            let mut res =
+                Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+            for (k, v) in headers {
+                res = res.header(k, v);
+            }
+            return Ok(res.body(full_body(Bytes::from(body))).unwrap_or_else(|_| {
+                full_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build plugin response",
+                )
+            }));
+        }
         // A hook error (including an isolated plugin panic, see #138) leaves
         // `proxy_res` holding the empty placeholder swapped in by the registry,
         // so we must not fall through and ship it. Return a clean 500 instead of
@@ -951,13 +985,6 @@ fn with_alt_svc_header(
         );
     }
     response
-}
-
-fn _empty_response(status: StatusCode) -> Response<BoxBody> {
-    Response::builder()
-        .status(status)
-        .body(Empty::new().map_err(|never| match never {}).boxed())
-        .unwrap_or_else(|_| Response::new(Empty::new().map_err(|never| match never {}).boxed()))
 }
 
 /// Check if error is a benign connection close to reduce log noise
