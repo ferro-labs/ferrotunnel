@@ -312,9 +312,7 @@ async fn handle_request(
         // trailing metadata (grpc-status); hyper's H2 client does not add it, so
         // restore it after stripping the hop-by-hop `TE` header.
         if is_grpc {
-            parts
-                .headers
-                .insert(hyper::header::TE, HeaderValue::from_static("trailers"));
+            add_grpc_te_trailers(&mut parts.headers);
         }
     }
 
@@ -858,6 +856,15 @@ pub(crate) fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap) {
     headers.remove(hyper::header::PROXY_AUTHENTICATE);
     headers.remove(hyper::header::PROXY_AUTHORIZATION);
     headers.remove(hyper::header::HeaderName::from_static("keep-alive"));
+}
+
+/// Restore `TE: trailers` on a gRPC-over-HTTP/2 forward request.
+///
+/// gRPC upstreams require it to return trailing metadata (grpc-status), and
+/// hyper's H2 client does not add it. Call after hop-by-hop stripping, on the
+/// gRPC path only.
+pub(crate) fn add_grpc_te_trailers(headers: &mut hyper::HeaderMap) {
+    headers.insert(hyper::header::TE, HeaderValue::from_static("trailers"));
 }
 
 /// Parse and normalize the Host header for secure multi-tenant routing.
