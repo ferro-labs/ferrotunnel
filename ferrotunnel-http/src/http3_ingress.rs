@@ -758,6 +758,11 @@ fn build_forward_request(
 
     if is_grpc {
         parts.version = hyper::Version::HTTP_2;
+        // hyper's H2 client does not add `TE: trailers`, which gRPC upstreams
+        // need to return trailing metadata (grpc-status).
+        parts
+            .headers
+            .insert(hyper::header::TE, HeaderValue::from_static("trailers"));
         if parts.uri.authority().is_none() {
             let path_and_query = parts
                 .uri

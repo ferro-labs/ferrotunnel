@@ -308,6 +308,14 @@ async fn handle_request(
     // upgrades which legitimately rely on Connection/Upgrade to negotiate a 101.
     if !is_ws {
         strip_hop_by_hop_headers(&mut parts.headers);
+        // gRPC over HTTP/2 requires `TE: trailers` for the upstream to return
+        // trailing metadata (grpc-status); hyper's H2 client does not add it, so
+        // restore it after stripping the hop-by-hop `TE` header.
+        if is_grpc {
+            parts
+                .headers
+                .insert(hyper::header::TE, HeaderValue::from_static("trailers"));
+        }
     }
 
     let mut forward_req = Request::from_parts(parts, limited_body);
