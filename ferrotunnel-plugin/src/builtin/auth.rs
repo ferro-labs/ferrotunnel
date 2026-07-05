@@ -64,9 +64,12 @@ impl Plugin for TokenAuthPlugin {
 
         match token {
             Some(t) if self.token_matches(t) => Ok(PluginAction::Continue),
+            // Use a generic reason so a missing token and a wrong token are
+            // indistinguishable to the client and the expected header name is
+            // not disclosed.
             _ => Ok(PluginAction::Reject {
                 status: 401,
-                reason: format!("Invalid or missing {}", self.header_name),
+                reason: "Invalid or missing authentication credentials".to_string(),
             }),
         }
     }

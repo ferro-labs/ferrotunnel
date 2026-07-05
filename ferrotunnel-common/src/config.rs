@@ -70,7 +70,11 @@ pub struct RateLimitConfig {
     pub streams_per_sec: u32,
     /// Maximum bytes per second per session
     pub bytes_per_sec: u64,
-    /// Burst allowance multiplier
+    /// Burst allowance multiplier applied to the per-second rates.
+    ///
+    /// The effective burst capacity is `rate * burst_factor`, saturating at
+    /// `u32::MAX`; a value of `0` is treated as `1` by the rate limiter. Values
+    /// beyond a small single-digit multiple offer no practical benefit.
     pub burst_factor: u32,
 }
 

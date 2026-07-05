@@ -10,7 +10,7 @@ use super::pool::ObjectPool;
 use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use ferrotunnel_common::Result;
+use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_protocol::frame::{Frame, OpenStreamFrame, Protocol, StreamPriority};
 use kanal::{bounded_async, AsyncReceiver, AsyncSender, ReceiveError};
 use std::io;
@@ -130,10 +130,16 @@ impl Multiplexer {
         &self.buffer_pool
     }
 
-    /// Allocate a new stream ID atomically (lock-free)
+    /// Allocate a new stream ID atomically (lock-free).
+    ///
+    /// IDs advance by two to preserve client/server parity. Returns an error
+    /// rather than wrapping past `u32::MAX`, so an exhausted ID space can never
+    /// silently alias a live stream.
     #[inline]
-    fn allocate_stream_id(&self) -> u32 {
-        self.next_stream_id.fetch_add(2, Ordering::Relaxed)
+    fn allocate_stream_id(&self) -> Result<u32> {
+        self.next_stream_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(2))
+            .map_err(|_| TunnelError::Protocol("stream ID space exhausted".into()))
     }
 
     /// Send a frame directly to the wire (priority derived from frame type and stream).
@@ -246,7 +252,7 @@ impl Multiplexer {
         protocol: Protocol,
         priority: StreamPriority,
     ) -> Result<VirtualStream> {
-        let stream_id = self.allocate_stream_id();
+        let stream_id = self.allocate_stream_id()?;
 
         let (tx, rx) = bounded_async(STREAM_CHANNEL_CAPACITY);
         self.streams.insert(stream_id, tx);

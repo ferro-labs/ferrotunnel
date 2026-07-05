@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-04
+
+Public-API and audit hardening release closing the v1.5.0 milestone and part of
+the v1.5.x audit backlog.
+
+### ⚠ Breaking changes
+
+- Configuration types are now encapsulated. `ClientConfig`, `ServerConfig`, and
+  `TunnelInfo` fields are private with public getters: construct them through
+  `Client::builder()` / `Server::builder()` and read them back with the
+  accessors (for example `config.token()`, `info.session_id()`) instead of
+  field access. This prevents mutation after `build()` and keeps the
+  authentication token out of `Debug` output ([#140](https://github.com/ferro-labs/ferrotunnel/issues/140)).
+
+### Security
+
+- Redact the authentication token in the `Debug` output of `ClientConfig` and
+  `ServerConfig` ([#140](https://github.com/ferro-labs/ferrotunnel/issues/140)).
+- Return a generic 401 reason from the token-auth plugin so a missing token and
+  a wrong token are indistinguishable and the expected header name is not
+  disclosed ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+
+### Fixed
+
+- Make builder TLS configuration fail at `build()` time: a disabled config or
+  empty/incomplete certificate, key, or CA paths are now rejected instead of
+  silently leaving the transport unchanged ([#141](https://github.com/ferro-labs/ferrotunnel/issues/141)).
+- Propagate the CLI `--tls-client-auth`/`--tls-ca` validation error through
+  `main` instead of calling `std::process::exit`, so tracing and shutdown run
+  ([#142](https://github.com/ferro-labs/ferrotunnel/issues/142)).
+- Honor response-plugin `Reject`/`Respond` decisions on the HTTP/1 ingress path,
+  which previously discarded them ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+- Strip hop-by-hop headers on the HTTP/1 forward path, matching the HTTP/3 path,
+  while preserving them for WebSocket upgrades ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+- Propagate HTTP/3 request-body read errors instead of converting them to a
+  clean EOF that silently truncates the upstream body ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+- Fail stream-ID allocation when the ID space is exhausted instead of wrapping
+  and aliasing a live stream ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+- Capture the full request path and query for request replay so a replayed
+  request matches the original ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+- Report tracing/OTLP initialization failures instead of discarding them
+  ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+- Enforce the `HandshakeFrame` `min_version <= max_version` invariant during
+  frame validation ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+
+### Changed
+
+- Hide the `core`, `http`, and `protocol` implementation-crate re-exports from
+  the public API documentation ([#140](https://github.com/ferro-labs/ferrotunnel/issues/140)).
+- Unify the duplicate `rand` dependency on 0.9 and document the `cargo-deny`
+  duplicate-version policy ([#122](https://github.com/ferro-labs/ferrotunnel/issues/122)).
+- Align the advertised MSRV (README, CONTRIBUTING, CLI, Dockerfile) with the
+  1.91 toolchain used by the manifest and CI ([#123](https://github.com/ferro-labs/ferrotunnel/issues/123)).
+- Mark `Client::builder()` / `Server::builder()` `#[must_use]` and document the
+  `burst_factor` bound ([#145](https://github.com/ferro-labs/ferrotunnel/issues/145)).
+
 ## [1.4.0] - 2026-07-03
 
 Protocol and configuration hardening release closing the v1.4.0 milestone.

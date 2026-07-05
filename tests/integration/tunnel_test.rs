@@ -48,7 +48,7 @@ async fn test_client_connects() {
     // Verify client got a session
     let tunnel_info = info.unwrap();
     assert!(
-        tunnel_info.session_id.is_some(),
+        tunnel_info.session_id().is_some(),
         "Session ID should not be empty"
     );
 
@@ -77,7 +77,7 @@ async fn test_http_through_tunnel() {
 
     let info = client.start().await.expect("Client failed to connect");
     let session_id = info
-        .session_id
+        .session_id()
         .expect("Session ID should be present")
         .to_string();
 
@@ -131,7 +131,7 @@ async fn test_large_payload() {
 
     let info = client.start().await.expect("Client failed to connect");
     let session_id = info
-        .session_id
+        .session_id()
         .expect("Session ID should be present")
         .to_string();
 

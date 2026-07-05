@@ -43,7 +43,8 @@ async fn test_multiple_clients() {
 
     // Verify both clients have unique session IDs
     assert_ne!(
-        info1.session_id, info2.session_id,
+        info1.session_id(),
+        info2.session_id(),
         "Clients should have different session IDs"
     );
 
@@ -72,7 +73,7 @@ async fn test_client_reconnect() {
         .expect("Failed to build client");
 
     let info1 = client.start().await.expect("First connect failed");
-    let session1 = info1.session_id;
+    let session1 = info1.session_id();
 
     // Disconnect
     let _ = client.shutdown().await;
@@ -92,7 +93,8 @@ async fn test_client_reconnect() {
 
     // New connection should have different session
     assert_ne!(
-        session1, info2.session_id,
+        session1,
+        info2.session_id(),
         "Reconnect should get new session"
     );
 

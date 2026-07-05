@@ -9,7 +9,7 @@ use h3::quic::{BidiStream, RecvStream, SendStream};
 use h3_quinn::quinn::{Endpoint, ServerConfig, TransportConfig, VarInt};
 use http_body_util::BodyExt;
 use hyper::body::Frame;
-use hyper::header::{HeaderName, HeaderValue, CONNECTION, HOST, TRANSFER_ENCODING, UPGRADE};
+use hyper::header::{HeaderName, HeaderValue, HOST};
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::io;
@@ -23,7 +23,7 @@ use tracing::{error, info, warn};
 
 const H3_ALPN: &[u8] = b"h3";
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+type BoxBody = http_body_util::combinators::BoxBody<Bytes, io::Error>;
 
 // Section 12.5: #[non_exhaustive] for semver-safe config evolution.
 // Construct via `Http3IngressConfig::default()` + struct update syntax.
@@ -751,11 +751,16 @@ fn build_forward_request(
     is_grpc: bool,
 ) -> std::result::Result<Request<BoxBody>, String> {
     let (mut parts, ()) = req.into_parts();
+    // Sanitize hop-by-hop headers first, then insert the trusted canonical Host
+    // so a client-supplied `Connection: host` cannot drop it.
+    crate::ingress::strip_hop_by_hop_headers(&mut parts.headers);
     parts.headers.insert(HOST, host.clone());
-    remove_connection_specific_headers(&mut parts.headers);
 
     if is_grpc {
         parts.version = hyper::Version::HTTP_2;
+        // hyper's H2 client does not add `TE: trailers`, which gRPC upstreams
+        // need to return trailing metadata (grpc-status).
+        crate::ingress::add_grpc_te_trailers(&mut parts.headers);
         if parts.uri.authority().is_none() {
             let path_and_query = parts
                 .uri
@@ -789,12 +794,15 @@ fn streaming_body_to_boxbody(body: Http3RequestBody) -> BoxBody {
 
     let mut body = body;
     let frame_stream = poll_fn(
-        move |cx| -> Poll<Option<std::result::Result<Frame<Bytes>, hyper::Error>>> {
+        move |cx| -> Poll<Option<std::result::Result<Frame<Bytes>, io::Error>>> {
             match Pin::new(&mut body).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+                // Propagate the read error instead of converting it to a clean
+                // EOF, so the upstream sees a failed request body rather than a
+                // silently truncated one.
                 Poll::Ready(Some(Err(e))) => {
                     error!("HTTP/3 request body error: {e}");
-                    Poll::Ready(None)
+                    Poll::Ready(Some(Err(e)))
                 }
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
@@ -803,12 +811,6 @@ fn streaming_body_to_boxbody(body: Http3RequestBody) -> BoxBody {
     );
 
     StreamBody::new(frame_stream).boxed()
-}
-
-fn remove_connection_specific_headers(headers: &mut hyper::HeaderMap) {
-    headers.remove(CONNECTION);
-    headers.remove(TRANSFER_ENCODING);
-    headers.remove(UPGRADE);
 }
 
 // ---------------------------------------------------------------------------
@@ -965,7 +967,7 @@ async fn collect_upstream_body(
 fn sanitize_response_parts(
     mut parts: hyper::http::response::Parts,
 ) -> hyper::http::response::Parts {
-    remove_connection_specific_headers(&mut parts.headers);
+    crate::ingress::strip_hop_by_hop_headers(&mut parts.headers);
     parts
 }
 

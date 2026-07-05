@@ -30,7 +30,6 @@ use ferrotunnel_http::HttpIngress;
 use ferrotunnel_http::{Http3Ingress, Http3IngressConfig};
 use ferrotunnel_plugin::PluginRegistry;
 use std::net::SocketAddr;
-#[cfg(feature = "http3")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -53,6 +52,7 @@ pub struct Server {
 pub struct ServerBuilder {
     config: ServerConfig,
     transport_config: Option<TransportConfig>,
+    tls_validation_error: Option<TunnelError>,
 }
 
 impl Server {
@@ -69,6 +69,7 @@ impl Server {
     ///     .build()
     ///     .unwrap();
     /// ```
+    #[must_use]
     pub fn builder() -> ServerBuilder {
         ServerBuilder::default()
     }
@@ -357,8 +358,17 @@ impl ServerBuilder {
     /// When enabled, the server will use TLS for all connections.
     #[must_use]
     pub fn tls(mut self, config: &TlsConfig) -> Self {
-        if let Some(tls) = TlsTransportConfig::from_common(config) {
-            self.transport_config = Some(TransportConfig::Tls(tls));
+        match validate_server_tls_config(config) {
+            Ok(()) => {
+                self.tls_validation_error = None;
+                if let Some(tls) = TlsTransportConfig::from_common(config) {
+                    self.transport_config = Some(TransportConfig::Tls(tls));
+                }
+            }
+            Err(error) => {
+                self.tls_validation_error = Some(error);
+                self.transport_config = None;
+            }
         }
         self
     }
@@ -383,6 +393,7 @@ impl ServerBuilder {
         if let Some(quic) =
             ferrotunnel_core::transport::quic::QuicTransportConfig::from_common(config)
         {
+            self.tls_validation_error = None;
             self.transport_config = Some(TransportConfig::Quic(quic));
         }
         self
@@ -396,6 +407,9 @@ impl ServerBuilder {
     /// - `token` must be set
     pub fn build(self) -> Result<Server> {
         self.config.validate()?;
+        if let Some(error) = self.tls_validation_error {
+            return Err(error);
+        }
         Ok(Server {
             config: self.config,
             transport_config: self.transport_config.unwrap_or_default(),
@@ -403,6 +417,34 @@ impl ServerBuilder {
             task: None,
         })
     }
+}
+
+fn validate_server_tls_config(config: &TlsConfig) -> Result<()> {
+    if !config.enabled {
+        return Err(TunnelError::Config(
+            "TLS config is disabled; omit ServerBuilder::tls() or enable TLS".into(),
+        ));
+    }
+
+    if missing_path(config.cert_path.as_ref()) {
+        return Err(TunnelError::Config("server TLS requires cert_path".into()));
+    }
+
+    if missing_path(config.key_path.as_ref()) {
+        return Err(TunnelError::Config("server TLS requires key_path".into()));
+    }
+
+    if config.client_auth && missing_path(config.ca_cert_path.as_ref()) {
+        return Err(TunnelError::Config(
+            "server TLS client_auth requires ca_cert_path".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn missing_path(path: Option<&PathBuf>) -> bool {
+    path.is_none_or(|path| path.as_os_str().is_empty())
 }
 
 #[cfg(test)]
@@ -505,13 +547,70 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
+        let result = Server::builder().token("secret").tls(&tls).build();
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("TLS config is disabled"));
+    }
+
+    #[test]
+    fn test_server_builder_tls_missing_cert() {
+        let tls = TlsConfig {
+            enabled: true,
+            key_path: Some(PathBuf::from("server.key")),
+            ..Default::default()
+        };
+        let result = Server::builder().token("secret").tls(&tls).build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cert_path"));
+    }
+
+    #[test]
+    fn test_server_builder_tls_missing_key() {
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(PathBuf::from("server.crt")),
+            ..Default::default()
+        };
+        let result = Server::builder().token("secret").tls(&tls).build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("key_path"));
+    }
+
+    #[test]
+    fn test_server_builder_tls_client_auth_missing_ca() {
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(PathBuf::from("server.crt")),
+            key_path: Some(PathBuf::from("server.key")),
+            client_auth: true,
+            ..Default::default()
+        };
+        let result = Server::builder().token("secret").tls(&tls).build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ca_cert_path"));
+    }
+
+    #[test]
+    fn test_server_builder_tls_with_cert_and_key() {
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(PathBuf::from("server.crt")),
+            key_path: Some(PathBuf::from("server.key")),
+            ..Default::default()
+        };
         let server = Server::builder()
             .token("secret")
             .tls(&tls)
             .build()
-            .expect("should build");
+            .expect("server-auth TLS should accept certificate and key paths");
 
-        // Server should work with TLS disabled
         assert!(!server.config().token.is_empty());
     }
 }

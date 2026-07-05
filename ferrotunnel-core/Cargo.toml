@@ -12,8 +12,8 @@ keywords = ["tunnel", "networking", "async", "core"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-ferrotunnel-common = { version = "1.4.0", path = "../ferrotunnel-common" }
-ferrotunnel-protocol = { version = "1.4.0", path = "../ferrotunnel-protocol" }
+ferrotunnel-common = { version = "1.5.0", path = "../ferrotunnel-common" }
+ferrotunnel-protocol = { version = "1.5.0", path = "../ferrotunnel-protocol" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -39,7 +39,7 @@ sha2 = "0.10"
 # Rate limiting
 governor = "0.10"
 nonzero_ext = "0.3"
-rand = "0.8"
+rand = "0.9"
 
 # Socket tuning for performance
 socket2 = "0.6"
@@ -54,7 +54,7 @@ crossbeam-queue = "0.3"
 quinn = { workspace = true, optional = true }
 
 # Optional metrics (decode/encode latency, queue depth)
-ferrotunnel-observability = { version = "1.4.0", path = "../ferrotunnel-observability", optional = true }
+ferrotunnel-observability = { version = "1.5.0", path = "../ferrotunnel-observability", optional = true }
 
 # File descriptor exhaustion (EMFILE/ENFILE) detection in accept-loop backoff
 [target.'cfg(unix)'.dependencies]

@@ -16,10 +16,15 @@ pub fn init_basic_observability(service_name: &str, enable_tracing: bool, enable
     }
 
     if enable_tracing {
-        let _ = init_tracing(TracingConfig {
+        if let Err(e) = init_tracing(TracingConfig {
             service_name: service_name.to_string(),
             otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
-        });
+        }) {
+            // Report the failure on stderr rather than silently continuing with
+            // no tracing subscriber installed (the tracing macros may not be
+            // wired up yet, so stderr is the reliable channel here).
+            eprintln!("Failed to initialize tracing/OTLP exporter: {e}");
+        }
     } else {
         init_minimal_logging();
     }

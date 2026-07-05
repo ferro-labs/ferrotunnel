@@ -304,6 +304,18 @@ async fn handle_request(
         Arc::clone(&body_oversized),
     )
     .boxed();
+    // Strip hop-by-hop headers before forwarding upstream, except for WebSocket
+    // upgrades which legitimately rely on Connection/Upgrade to negotiate a 101.
+    if !is_ws {
+        strip_hop_by_hop_headers(&mut parts.headers);
+        // gRPC over HTTP/2 requires `TE: trailers` for the upstream to return
+        // trailing metadata (grpc-status); hyper's H2 client does not add it, so
+        // restore it after stripping the hop-by-hop `TE` header.
+        if is_grpc {
+            add_grpc_te_trailers(&mut parts.headers);
+        }
+    }
+
     let mut forward_req = Request::from_parts(parts, limited_body);
 
     // HTTP/2 (gRPC) requires an absolute URI (scheme + authority).
@@ -571,7 +583,33 @@ async fn handle_request(
         .execute_response_hooks(&mut proxy_res, &response_ctx)
         .await
     {
-        Ok(PluginAction::Continue | _) => {}
+        // Continue and Modify proceed with the (possibly in-place modified)
+        // response. Matching Reject and Respond exhaustively means a
+        // response-plugin decision is honored instead of silently dropped.
+        Ok(PluginAction::Continue | PluginAction::Modify { .. }) => {}
+        Ok(PluginAction::Reject { status, reason }) => {
+            return Ok(full_response(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+                &reason,
+            ));
+        }
+        Ok(PluginAction::Respond {
+            status,
+            headers,
+            body,
+        }) => {
+            let mut res =
+                Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+            for (k, v) in headers {
+                res = res.header(k, v);
+            }
+            return Ok(res.body(full_body(Bytes::from(body))).unwrap_or_else(|_| {
+                full_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build plugin response",
+                )
+            }));
+        }
         // A hook error (including an isolated plugin panic, see #138) leaves
         // `proxy_res` holding the empty placeholder swapped in by the registry,
         // so we must not fall through and ship it. Return a clean 500 instead of
@@ -786,6 +824,49 @@ fn is_websocket_upgrade(headers: &hyper::HeaderMap) -> bool {
     upgrade && connection
 }
 
+/// Remove hop-by-hop headers before forwarding a request upstream.
+///
+/// Per RFC 7230 §6.1 this strips the fixed connection-management headers plus
+/// any header named in the `Connection` header value, so a connection-scoped or
+/// smuggled header cannot leak to the upstream. Callers keep these headers for
+/// WebSocket upgrades, which legitimately negotiate over `Connection`/`Upgrade`.
+pub(crate) fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap) {
+    // Remove any header named in the `Connection` value (RFC 7230 §6.1), except
+    // `Host`: it is end-to-end and required for strict host-based forwarding, so
+    // a `Connection: host` token must not be able to drop it.
+    if let Some(connection) = headers.get(hyper::header::CONNECTION).cloned() {
+        if let Ok(value) = connection.to_str() {
+            for name in value.split(',') {
+                let name = name.trim();
+                if name.is_empty() || name.eq_ignore_ascii_case("host") {
+                    continue;
+                }
+                if let Ok(header) = hyper::header::HeaderName::from_bytes(name.as_bytes()) {
+                    headers.remove(header);
+                }
+            }
+        }
+    }
+    // Remove the standard hop-by-hop headers.
+    headers.remove(hyper::header::CONNECTION);
+    headers.remove(hyper::header::TRANSFER_ENCODING);
+    headers.remove(hyper::header::UPGRADE);
+    headers.remove(hyper::header::TE);
+    headers.remove(hyper::header::TRAILER);
+    headers.remove(hyper::header::PROXY_AUTHENTICATE);
+    headers.remove(hyper::header::PROXY_AUTHORIZATION);
+    headers.remove(hyper::header::HeaderName::from_static("keep-alive"));
+}
+
+/// Restore `TE: trailers` on a gRPC-over-HTTP/2 forward request.
+///
+/// gRPC upstreams require it to return trailing metadata (grpc-status), and
+/// hyper's H2 client does not add it. Call after hop-by-hop stripping, on the
+/// gRPC path only.
+pub(crate) fn add_grpc_te_trailers(headers: &mut hyper::HeaderMap) {
+    headers.insert(hyper::header::TE, HeaderValue::from_static("trailers"));
+}
+
 /// Parse and normalize the Host header for secure multi-tenant routing.
 /// Handles IPv6 addresses, port stripping, and case normalization.
 pub(crate) fn parse_and_normalize_host(
@@ -953,13 +1034,6 @@ fn with_alt_svc_header(
     response
 }
 
-fn _empty_response(status: StatusCode) -> Response<BoxBody> {
-    Response::builder()
-        .status(status)
-        .body(Empty::new().map_err(|never| match never {}).boxed())
-        .unwrap_or_else(|_| Response::new(Empty::new().map_err(|never| match never {}).boxed()))
-}
-
 /// Check if error is a benign connection close to reduce log noise
 #[allow(clippy::borrowed_box)]
 fn is_connection_close_error(err: &Box<dyn std::error::Error + Send + Sync>) -> bool {
@@ -1026,6 +1100,52 @@ mod tests {
         headers.insert(hyper::header::UPGRADE, "websocket".parse().unwrap());
         headers.insert(hyper::header::CONNECTION, "Upgrade".parse().unwrap());
         assert!(is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn strip_hop_by_hop_headers_removes_hop_by_hop_but_keeps_host() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(hyper::header::HOST, "tenant.example".parse().unwrap());
+        headers.insert(
+            hyper::header::CONNECTION,
+            "keep-alive, host, x-smuggle".parse().unwrap(),
+        );
+        headers.insert(hyper::header::TE, "trailers".parse().unwrap());
+        headers.insert(hyper::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        headers.insert(
+            hyper::header::HeaderName::from_static("x-smuggle"),
+            "1".parse().unwrap(),
+        );
+        headers.insert(
+            hyper::header::HeaderName::from_static("keep-alive"),
+            "timeout=5".parse().unwrap(),
+        );
+        headers.insert(
+            hyper::header::HeaderName::from_static("x-end-to-end"),
+            "keep".parse().unwrap(),
+        );
+
+        strip_hop_by_hop_headers(&mut headers);
+
+        // Host survives even though it is named in Connection.
+        assert_eq!(headers.get(hyper::header::HOST).unwrap(), "tenant.example");
+        // A genuine end-to-end header is untouched.
+        assert_eq!(
+            headers
+                .get(hyper::header::HeaderName::from_static("x-end-to-end"))
+                .unwrap(),
+            "keep"
+        );
+        // Connection-listed and standard hop-by-hop headers are removed.
+        assert!(headers.get(hyper::header::CONNECTION).is_none());
+        assert!(headers.get(hyper::header::TE).is_none());
+        assert!(headers.get(hyper::header::TRANSFER_ENCODING).is_none());
+        assert!(headers
+            .get(hyper::header::HeaderName::from_static("x-smuggle"))
+            .is_none());
+        assert!(headers
+            .get(hyper::header::HeaderName::from_static("keep-alive"))
+            .is_none());
     }
 
     #[test]
