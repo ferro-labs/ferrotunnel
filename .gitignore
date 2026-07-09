@@ -33,6 +33,9 @@ ferrotunnel-protocol/fuzz/corpus/
 #extra
 extra/
 
+# Graphify Out
+graphify-out
+
 # Config files (may contain secrets)
 *.toml.local
 config/*.secret.*
