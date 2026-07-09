@@ -133,7 +133,7 @@ pub struct ClientArgs {
     #[arg(long, env = "FERROTUNNEL_TOKEN")]
     token: Option<String>,
 
-    /// Log level
+    /// Reserved CLI option; set RUST_LOG to configure log filtering
     #[arg(long, default_value = "info", env = "RUST_LOG")]
     log_level: String,
 
@@ -169,7 +169,7 @@ pub struct ClientArgs {
     #[arg(long = "quic", env = "FERROTUNNEL_QUIC")]
     quic: bool,
 
-    /// Enable 0-RTT for faster QUIC reconnection (vulnerable to replay — use with caution)
+    /// Request QUIC 0-RTT; currently falls back to a full handshake
     #[cfg(feature = "quic")]
     #[arg(long = "quic-0rtt", env = "FERROTUNNEL_QUIC_0RTT")]
     quic_0rtt: bool,

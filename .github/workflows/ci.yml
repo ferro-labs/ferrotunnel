@@ -39,8 +39,13 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v6
+      - name: Run RustSec advisory audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -89,22 +94,33 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
 
-  test-extra:
-    name: Tests (ubuntu, ${{ matrix.rust }})
+  test-msrv:
+    name: Tests (ubuntu, MSRV 1.91)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [beta, "1.91"]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: "1.91"
       - uses: swatinem/rust-cache@v2
         with:
-          key: test-ubuntu-${{ matrix.rust }}
+          key: test-ubuntu-msrv
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+  test-beta:
+    name: Tests (ubuntu, beta)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: beta
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: test-ubuntu-beta
       - name: Run tests
         run: cargo test --workspace --all-features
 
@@ -166,6 +182,8 @@ jobs:
       - compliance-check
       - build-release
       - test
+      - test-msrv
+      - test-beta
       - docs
       - fuzz-smoke-test
     runs-on: ubuntu-latest
@@ -174,5 +192,5 @@ jobs:
       - name: Decide whether all jobs succeeded
         uses: re-actors/alls-green@release/v1
         with:
-          allowed-failures: test-extra
+          allowed-failures: test-beta
           jobs: ${{ toJSON(needs) }}

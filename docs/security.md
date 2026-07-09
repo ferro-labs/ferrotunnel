@@ -1,298 +1,196 @@
-# FerroTunnel Security Best Practices
+# FerroTunnel Security Guide
 
-## Why Rust Matters: Memory Safety Comparison
+This guide describes the security properties and deployment controls available in FerroTunnel 1.5.x.
 
-### Traditional C/C++ Tunnels: A History of Memory Vulnerabilities
+## Why Rust Matters: Memory-Safety Comparison
 
-Tunneling solutions built in C/C++ have suffered from **30+ critical memory safety vulnerabilities** over the past decade. These vulnerabilities stem from manual memory management, lack of bounds checking, and unsafe concurrency primitives inherent to C/C++.
+Tunnel servers parse untrusted network input and maintain many concurrent connections.
+Memory-corruption defects in this class of software can turn malformed input or state-management
+errors into crashes or arbitrary code execution.
 
-**Memory Safety CVEs in Traditional Tunnels:**
+### Historical examples
 
-| Tunnel | Language | Memory Safety CVEs | Critical Examples |
-|--------|----------|-------------------|-------------------|
-| OpenSSH | C | 15+ | [CVE-2024-6387](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) (race condition RCE), [CVE-2023-25136](https://nvd.nist.gov/vuln/detail/CVE-2023-25136) (double-free), [CVE-2025-26465/26466](https://nvd.nist.gov/vuln/detail/CVE-2025-26465) (memory exhaustion), [CVE-2016-1907](https://nvd.nist.gov/vuln/detail/CVE-2016-1907) (out-of-bounds read) |
-| OpenVPN | C | 10+ | [CVE-2024-1305](https://nvd.nist.gov/vuln/detail/CVE-2024-1305) (integer overflow → memory corruption), [CVE-2024-27459](https://nvd.nist.gov/vuln/detail/CVE-2024-27459) (stack overflow → RCE), [CVE-2024-28820](https://nvd.nist.gov/vuln/detail/CVE-2024-28820) (buffer overflow), [CVE-2025-50054](https://nvd.nist.gov/vuln/detail/CVE-2025-50054) (buffer overflow kernel crash) |
-| stunnel | C | 8+ | [CVE-2011-2940](https://nvd.nist.gov/vuln/detail/CVE-2011-2940) (heap memory corruption → RCE), [CVE-2002-0002](https://nvd.nist.gov/vuln/detail/CVE-2002-0002) (format string → RCE), [CVE-2013-1762](https://nvd.nist.gov/vuln/detail/CVE-2013-1762) (buffer overflow in NTLM) |
+Illustrative vulnerabilities in C-based tunnel projects and related components include:
 
-*Search complete CVE databases:*
-- [OpenSSH CVEs on NVD](https://nvd.nist.gov/vuln/search/results?query=openssh&results_type=overview)
-- [OpenVPN CVEs on NVD](https://nvd.nist.gov/vuln/search/results?query=openvpn&results_type=overview)
-- [stunnel CVEs on NVD](https://nvd.nist.gov/vuln/search/results?query=stunnel&results_type=overview)
+| Project or component | Advisory | Reported issue |
+| --- | --- | --- |
+| OpenSSH `sshd` 9.1 | [CVE-2023-25136](https://nvd.nist.gov/vuln/detail/CVE-2023-25136) | An unauthenticated attacker could trigger a double-free; code execution was considered theoretically possible. |
+| OpenVPN TAP-Windows6 driver | [CVE-2024-1305](https://nvd.nist.gov/vuln/detail/CVE-2024-1305) | An unchecked write size could overflow kernel buffers, causing a system crash or potentially arbitrary code execution. |
+| stunnel 4.40 and 4.41 | [CVE-2011-2940](https://nvd.nist.gov/vuln/detail/CVE-2011-2940) | Heap memory corruption could cause denial of service or potentially arbitrary code execution. |
+| OpenSSH `sshd` | [CVE-2024-6387](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) | A signal-handler race could allow an unauthenticated remote attacker to trigger unsafe signal handling. |
 
-### How Rust Eliminates These Vulnerabilities
+These examples are illustrative, not an exhaustive CVE count. Each advisory has its own affected
+component, configuration, and exploitability. They show why memory safety matters, but they do
+not prove that choosing Rust alone would prevent every exact root cause.
 
-FerroTunnel uses Rust's type system and ownership model to **eliminate entire vulnerability classes at compile time**, not runtime.
+Advisory summaries were checked on 2026-07-10. Follow the linked records for current scope and
+status.
 
-**Compile-Time Guarantees vs C/C++ Runtime Risks:**
+### Safe Rust guarantees and remaining risks
 
-| Vulnerability Class | C/C++ Approach | Rust Protection in FerroTunnel |
-|---------------------|----------------|-------------------------------|
-| **Buffer Overflows** | Manual bounds checking, easy to miss | ✅ **Compile-time bounds enforcement** - Array/slice access is always checked |
-| **Use-After-Free** | Manual tracking of pointer lifetimes | ✅ **Ownership system** - Compiler prevents access after drop |
-| **Double-Free** | Manual memory management, error-prone | ✅ **Impossible by design** - Each value has exactly one owner |
-| **Data Races** | Mutex discipline, runtime detection | ✅ **Compile-time thread safety** - `Send`/`Sync` traits enforce safe concurrency |
-| **Integer Overflows** | Silent wraparound, undefined behavior | ✅ **Checked arithmetic** - Panics in debug, wrapping explicit in release |
-| **Null Pointer Dereference** | NULL checks, runtime crashes | ✅ **`Option<T>` type system** - Compiler forces explicit handling |
-| **Memory Leaks** | Manual cleanup required | ✅ **RAII with Drop trait** - Automatic cleanup guaranteed |
-| **Format String Bugs** | `printf` family vulnerabilities | ✅ **Type-safe formatting** - Format strings checked at compile time |
+| Risk class | What Safe Rust provides | What remains |
+| --- | --- | --- |
+| Out-of-bounds memory access | Array and slice indexing is bounds-checked. Constant indices may be rejected at compile time; dynamic indices are checked at runtime. | A failed runtime check can still panic, so parsers need explicit validation and error handling. |
+| Use-after-free and double-free | Ownership and lifetimes prevent access after a value is dropped and prevent ordinary double-free in safe code. | This guarantee does not extend to unsound `unsafe` code or defects in dependencies. |
+| Data races | Borrowing rules together with `Send` and `Sync` prevent data races in safe code. | Rust does not prevent logical race conditions, deadlocks, starvation, or incorrect synchronization. |
+| Null and dangling references | Safe references must be valid and non-null; `Option<T>` represents absence explicitly. | Raw pointers and foreign interfaces remain outside this safe-reference guarantee. |
+| Integer overflow | Integer overflow does not produce C-style undefined behavior, and checked or saturating operations are available. | Optimized builds may wrap unless checks are enabled or explicit checked operations are used; logic bugs remain possible. |
+| Memory and resource leaks | Ownership and `Drop` provide deterministic cleanup on ordinary ownership paths. | Safe Rust permits leaks, reference cycles, deadlocks, and processes that never reach cleanup. |
 
-### FerroTunnel's Zero-Unsafe-Code Guarantee
+The [Rust Reference](https://doc.rust-lang.org/reference/expressions/array-expr.html#array-and-slice-indexing-expressions)
+documents compile-time versus runtime bounds checks. The
+[Rustonomicon](https://doc.rust-lang.org/nomicon/races.html) distinguishes data races from
+general race conditions, and the
+[Rust Reference](https://doc.rust-lang.org/reference/behavior-not-considered-unsafe.html)
+documents integer-overflow behavior and permitted resource leaks.
 
-**Workspace-Level Enforcement:**
-```rust
-// In workspace Cargo.toml
-#![forbid(unsafe)]
+### FerroTunnel's unsafe-code boundary
+
+The workspace enforces:
+
+```toml
+[workspace.lints.rust]
+unsafe_code = "forbid"
 ```
 
-This means:
-- **Every single line** of FerroTunnel code is memory-safe
-- **No unsafe blocks** anywhere in the codebase
-- **No FFI boundaries** (except OS syscalls via libc, which is unavoidable)
-- **Pure Rust dependencies** for critical paths (rustls instead of OpenSSL)
+Every workspace-owned crate either inherits this lint or declares the same prohibition. This
+rejects unsafe syntax in project-owned source; it does not inspect third-party dependencies or
+claim that the full dependency graph contains no unsafe or native code.
 
-**Why This Matters:**
-- OpenSSH's [CVE-2024-6387 "regreSSHion"](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) was a race condition leading to RCE—**impossible in Rust** due to compile-time race detection
-- OpenVPN's [CVE-2024-1305](https://nvd.nist.gov/vuln/detail/CVE-2024-1305) integer overflow → memory corruption—**prevented in Rust** by checked arithmetic
-- stunnel's [CVE-2011-2940](https://nvd.nist.gov/vuln/detail/CVE-2011-2940) heap corruption—**cannot occur in Rust** due to ownership rules
+FerroTunnel uses [rustls](https://github.com/rustls/rustls) instead of OpenSSL for tunnel TLS and
+explicitly installs rustls's `ring` cryptography provider. This describes the selected stack; it
+is not a claim that cryptography is vulnerability-free or that every dependency is pure Rust.
 
-### FerroTunnel Security Architecture
+**Why it matters:** Safe Rust removes major memory-corruption paths from FerroTunnel's
+project-owned code before deployment. Protocol validation, resource limits, dependency audits,
+secure transport configuration, and operational monitoring remain necessary for the risks the
+language does not eliminate.
 
-**Modern Cryptography (Pure Rust):**
-- **TLS 1.3-only** via [rustls](https://github.com/rustls/rustls) (no C dependencies)
-- **No legacy protocols** (SSLv3, TLS 1.0/1.1/1.2 disabled by default)
-- **Mutual TLS (mTLS)** for client certificate authentication
-- **Constant-time token comparison** (timing attack resistant)
+## Security model
 
-**Defense in Depth:**
-- **Token-based authentication** with SHA-256 hashing
-- **Built-in rate limiting** (per-session stream and byte limits)
-- **Frame size limits** (prevents memory exhaustion attacks)
-- **Automated dependency scanning** (`cargo-audit` in CI/CD pipeline)
-- **Supply chain security** (`cargo-deny` bans known vulnerable crates)
+FerroTunnel combines the memory-safety boundary above with authenticated sessions, configurable
+encrypted transports, protocol validation, resource controls, observability, and dependency
+checks. The sections below distinguish enforced controls from reserved configuration.
 
-**Observability for Security:**
-- **Prometheus metrics** for anomaly detection
-- **OpenTelemetry tracing** for request inspection
-- **Built-in dashboard** for real-time monitoring
-- **Audit logging** for all authentication attempts
+FerroTunnel authenticates tunnel sessions with a shared token. Token comparison is constant time after format validation. The configured token itself is used for authentication; `hash_token` is a utility function and is not a hashed-token storage mode.
 
----
+## Transport security
 
-## Token Management
+The control-plane transport is selected explicitly:
 
-### Token Requirements
+| Mode | Encryption | Notes |
+| --- | --- | --- |
+| TCP | None | Default. Use only on a trusted network. |
+| TLS over TCP | rustls TLS | Requires server certificates and client CA verification. |
+| QUIC | TLS 1.3 | Requires certificates. The 0-RTT option currently uses a full handshake. |
 
-- **Minimum length**: 32 bytes (256 bits)
-- **Format**: Printable ASCII characters only
-- **Generation**: Use cryptographically secure random generator
+### TLS server and client
 
 ```bash
-# Generate a secure token
+# Server
+export FERROTUNNEL_TOKEN="$(cat /run/secrets/ferrotunnel-token)"
+ferrotunnel server \
+  --bind 0.0.0.0:7835 \
+  --tls-cert /run/secrets/server.crt \
+  --tls-key /run/secrets/server.key
+
+# Client
+export FERROTUNNEL_TOKEN="$(cat /run/secrets/ferrotunnel-token)"
+ferrotunnel client \
+  --server tunnel.example.com:7835 \
+  --tls \
+  --tls-ca /etc/ssl/ferrotunnel-ca.crt \
+  --local-addr 127.0.0.1:8080
+```
+
+For mutual TLS, add `--tls-client-auth --tls-ca <client-ca>` on the server and `--tls-cert <client-cert> --tls-key <client-key>` on the client.
+
+`--tls-skip-verify` disables peer authentication and is only appropriate for controlled testing. It must be selected explicitly and emits a warning.
+
+### QUIC
+
+Build with the `quic` feature, configure the server certificate and key, and give clients a trusted CA. QUIC always encrypts transport data, but an encrypted connection without certificate verification is still vulnerable to interception.
+
+## Token management
+
+FerroTunnel accepts non-empty printable tokens up to 256 bytes. Use at least 32 random bytes even though that recommendation is not enforced.
+
+```bash
 openssl rand -base64 32
-
-# Or using /dev/urandom
-head -c 32 /dev/urandom | base64
 ```
 
-### Token Storage
+Server tokens should come from `FERROTUNNEL_TOKEN`, `--token-file`, or the secure prompt. The server deliberately does not accept `--token`, which keeps the secret out of process listings and shell history. Restrict token-file permissions and rotate tokens after exposure.
 
-- **Never** commit tokens to version control
-- Use environment variables or secret managers
-- Rotate tokens regularly (recommended: every 90 days)
+Tokens sent over the default TCP transport are plaintext on the network. Use TLS or QUIC outside a trusted network.
 
-```bash
-# Environment variable
-export FERROTUNNEL_TOKEN="$(cat /run/secrets/tunnel-token)"
+## Dashboard security
 
-# Secret manager (example with AWS)
-FERROTUNNEL_TOKEN=$(aws secretsmanager get-secret-value \
-  --secret-id ferrotunnel/token --query SecretString --output text)
-```
+The dashboard binds to loopback by default. A non-loopback bind requires `--dashboard-allow-non-loopback` and an authentication token. Keep the dashboard behind a firewall or authenticated reverse proxy, and avoid placing its token in URLs or logs.
 
-### Token Hashing
+## Resource controls
 
-FerroTunnel supports storing hashed tokens for additional security:
+The public `LimitsConfig` contains both enforced and reserved controls:
+
+| Control | 1.5.x status |
+| --- | --- |
+| `max_sessions` | Enforced when accepting tunnel sessions. |
+| `max_frame_bytes` | Enforced by protocol codecs. |
+| Token and capability bounds | Enforced during frame validation. |
+| Session rate limits | Enforced for stream and byte budgets. |
+| `max_streams_per_session` | Validated but not yet wired into stream admission. |
+| `max_inflight_frames` | Validated but not yet wired into frame admission. |
+
+Configure the enforced limits and use firewall, ingress, and operating-system controls for the remaining concurrency boundaries. Do not treat the reserved fields as isolation controls in 1.5.x.
 
 ```rust
-use ferrotunnel_core::auth::hash_token;
+use ferrotunnel::{common::LimitsConfig, Server};
 
-let token = "my-secret-token";
-let hash = hash_token(token);
-// Store hash, not plaintext
+# fn build() -> ferrotunnel::Result<Server> {
+let limits = LimitsConfig {
+    max_frame_bytes: 4 * 1024 * 1024,
+    max_sessions: 500,
+    ..LimitsConfig::default()
+};
+
+Server::builder()
+    .bind("0.0.0.0:7835".parse().expect("valid tunnel bind"))
+    .http_bind("0.0.0.0:8080".parse().expect("valid HTTP bind"))
+    .token("replace-with-a-random-token")
+    .limits(&limits)
+    .build()
+# }
 ```
 
-## TLS Configuration
+Raw TCP ingress in 1.5.x selects an eligible TCP session and has no tenant routing key. Run it only in a single-tenant trust boundary. Host-based HTTP ingress has explicit routing.
 
-### Requirements
+## Network controls
 
-- **TLS 1.3 only** - Enforced by rustls
-- Modern cipher suites (AEAD only)
-- Valid certificates with proper SANs
+- Expose only the required control-plane and ingress ports.
+- Keep metrics and dashboard listeners on private or loopback addresses.
+- Apply connection limits at the firewall or load balancer.
+- Protect certificate private keys with restrictive file permissions.
+- Monitor structured tracing for repeated authentication and connection failures.
 
-### Certificate Checklist
+## Dependency checks
 
-- [ ] Certificate matches server hostname
-- [ ] Subject Alternative Names (SANs) include all hostnames/IPs
-- [ ] Certificate not expired
-- [ ] Certificate chain is complete
-- [ ] Private key permissions are 600 (owner read/write only)
+Run the same security gate used by release validation:
 
 ```bash
-# Verify certificate
-openssl x509 -in server.crt -text -noout
-
-# Check expiration
-openssl x509 -in server.crt -enddate -noout
-
-# Verify chain
-openssl verify -CAfile ca.crt server.crt
+cargo install cargo-audit cargo-deny --locked
+make audit
 ```
 
-### Client Certificate Authentication
+`cargo audit` checks the lockfile against RustSec advisories. `cargo deny check` applies advisory, license, source, and duplicate-dependency policy across all features.
 
-For high-security environments, enable mutual TLS:
+## Deployment checklist
 
-```toml
-[tls]
-enabled = true
-client_auth = true
-ca_cert_path = "/path/to/client-ca.crt"
-```
+- [ ] Upgrade to the latest 1.5.x patch.
+- [ ] Enable verified TLS or QUIC outside a trusted network.
+- [ ] Generate a random token of at least 32 bytes and store it outside process arguments.
+- [ ] Bind the dashboard and metrics endpoints to loopback or a private interface.
+- [ ] Set an enforced session and frame-size ceiling appropriate for the host.
+- [ ] Add external connection limits for stream and in-flight concurrency.
+- [ ] Restrict raw TCP ingress to a single-tenant boundary.
+- [ ] Run `make audit` before deployment and after dependency updates.
 
-## Rate Limiting
-
-### Default Limits
-
-| Limit | Default | Description |
-|-------|---------|-------------|
-| Streams/sec | 100 | New stream opens per second |
-| Bytes/sec | 10MB | Data throughput per session |
-| Burst | 2x | Burst allowance multiplier |
-
-### Tuning Guidelines
-
-```toml
-[rate_limit]
-# For API gateway (many small requests)
-streams_per_sec = 500
-bytes_per_sec = 5242880  # 5MB/s
-
-# For file transfer (fewer large requests)
-streams_per_sec = 50
-bytes_per_sec = 104857600  # 100MB/s
-```
-
-## Resource Limits
-
-### Memory Protection
-
-```toml
-[limits]
-max_sessions = 1000
-max_streams_per_session = 100
-max_frame_bytes = 16777216  # 16MB
-max_inflight_frames = 100
-```
-
-### Connection Limits
-
-- Set `max_sessions` based on available memory (~100KB per session)
-- Set `max_streams_per_session` based on expected concurrency
-- Use `max_frame_bytes` to prevent memory exhaustion
-
-## Network Security
-
-### Firewall Rules
-
-```bash
-# Allow only tunnel port
-iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
-iptables -A INPUT -p tcp --dport 8443 -m state --state ESTABLISHED -j ACCEPT
-
-# Rate limit connections
-iptables -A INPUT -p tcp --dport 8443 -m connlimit --connlimit-above 100 -j REJECT
-```
-
-### Private Network Deployment
-
-For internal services, bind to private interface:
-
-```toml
-[server]
-bind = "10.0.0.1:8443"  # Private IP only
-```
-
-### Reverse Proxy
-
-For additional protection, use a reverse proxy:
-
-```nginx
-# nginx.conf
-stream {
-    upstream ferrotunnel {
-        server 127.0.0.1:8443;
-    }
-
-    server {
-        listen 443;
-        proxy_pass ferrotunnel;
-        proxy_timeout 300s;
-    }
-}
-```
-
-## Threat Model
-
-### Trust Boundaries
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    INTERNET                         │
-│                   (Untrusted)                       │
-└─────────────────────────┬───────────────────────────┘
-                          │ TLS 1.3
-                          ▼
-┌─────────────────────────────────────────────────────┐
-│              FerroTunnel Server                     │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ Token Authentication                        │    │
-│  │ Rate Limiting                               │    │
-│  │ Resource Limits                             │    │
-│  └─────────────────────────────────────────────┘    │
-└─────────────────────────┬───────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────┐
-│              Internal Network                       │
-│                   (Trusted)                         │
-└─────────────────────────────────────────────────────┘
-```
-
-### Attack Vectors & Mitigations
-
-| Attack | Mitigation |
-|--------|------------|
-| Token brute force | Rate limiting, long tokens, constant-time compare |
-| Connection flooding | Max sessions limit, firewall rules |
-| Memory exhaustion | Frame size limits, stream limits |
-| MITM | TLS 1.3, certificate validation |
-| Replay attacks | Session IDs, timestamps |
-
-## Security Checklist
-
-### Before Deployment
-
-- [ ] TLS enabled with valid certificates
-- [ ] Token is 32+ bytes, randomly generated
-- [ ] Token stored securely (not in code/config files)
-- [ ] Resource limits configured appropriately
-- [ ] Firewall rules in place
-- [ ] Logging enabled
-
-### Regular Maintenance
-
-- [ ] Rotate tokens every 90 days
-- [ ] Renew certificates before expiration
-- [ ] Review logs for anomalies
-- [ ] Update to latest version
-- [ ] Run `cargo audit` on dependencies
+Report vulnerabilities privately using [SECURITY.md](../SECURITY.md).

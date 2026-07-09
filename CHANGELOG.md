@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-07-04
+## [1.5.1] - 2026-07-11
+
+Maintenance release restoring reproducible dependency and release gates and aligning public documentation with the 1.5.x runtime.
+
+### Security
+
+- Update `crossbeam-epoch` to 0.9.20 to resolve RUSTSEC-2026-0204.
+- Update `anyhow` to 1.0.103 and `rand` to 0.9.3 to clear the remaining RustSec unsoundness notices.
+- Track `Cargo.lock` for reproducible CLI and release-asset builds.
+- Run cargo-audit and all-feature cargo-deny policy in the required CI compliance gate.
+
+### Changed
+
+- Require the Rust 1.91 test job in the aggregate CI gate while retaining beta as an allowed signal.
+- Validate package metadata and contents for all eight published crates before release.
+- Run dependency security checks before the production publish script uploads crates.
+- Correct roadmap, security, plugin, soak, installer, workflow, and QUIC 0-RTT documentation.
+- Update workspace and internal dependency versions to 1.5.1.
+
+## [1.5.0] - 2026-07-05
 
 Public-API and audit hardening release closing the v1.5.0 milestone and part of
 the v1.5.x audit backlog.
@@ -184,7 +203,7 @@ Hardening release closing the v1.2.0 audit milestone.
 #### Dependencies
 - **quinn** 0.11 (optional, `quic` feature): QUIC implementation using rustls 0.23 + ring (already existing dependencies)
 
-## [1.0.6] - Unreleased
+## [1.0.6] - 2026-03-13
 
 ### Fixed
 
@@ -386,7 +405,10 @@ FerroTunnel v1.0.0 is the first stable release.
 | `ferrotunnel-observability` | Metrics, tracing, and dashboard |
 | `ferrotunnel-common` | Shared types and errors |
 
-[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/ferro-labs/ferrotunnel/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.0.8...v1.1.0

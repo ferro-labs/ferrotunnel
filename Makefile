@@ -97,13 +97,19 @@ install-tools:
 	rustup component add rustfmt clippy
 	cargo install cargo-audit cargo-deny cargo-fuzz
 
-# Dry run cargo publish for all crates (in dependency order)
+# Validate package metadata and contents for all crates in dependency order.
+# Verification builds run separately because unpublished workspace dependency
+# versions are not available from crates.io until the production publish step.
 publish-dry-run:
-	@echo "Dry running cargo publish..."
-	cargo publish -p ferrotunnel-common --dry-run --allow-dirty
-	cargo publish -p ferrotunnel-protocol --dry-run --allow-dirty
-	cargo publish -p ferrotunnel-core --dry-run --allow-dirty
-	cargo publish -p ferrotunnel-plugin --dry-run --allow-dirty
+	@echo "Validating publishable crate packages..."
+	cargo package -p ferrotunnel-common --allow-dirty --list
+	cargo package -p ferrotunnel-protocol --allow-dirty --list
+	cargo package -p ferrotunnel-plugin --allow-dirty --list
+	cargo package -p ferrotunnel-observability --allow-dirty --list
+	cargo package -p ferrotunnel-core --allow-dirty --list
+	cargo package -p ferrotunnel-http --allow-dirty --list
+	cargo package -p ferrotunnel --allow-dirty --list
+	cargo package -p ferrotunnel-cli --allow-dirty --list
 
 # Publish release manually
 publish:

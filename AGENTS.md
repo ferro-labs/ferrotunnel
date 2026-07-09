@@ -87,6 +87,6 @@ imperative; rustdoc stays brief with no meta-commentary or disclaimers.
 
 Crates must be published in dependency order:
 ```
-ferrotunnel-common → ferrotunnel-protocol → ferrotunnel-plugin → ferrotunnel-core → ferrotunnel-observability → ferrotunnel-http → ferrotunnel → ferrotunnel-cli
+ferrotunnel-common → ferrotunnel-protocol → ferrotunnel-plugin → ferrotunnel-observability → ferrotunnel-core → ferrotunnel-http → ferrotunnel → ferrotunnel-cli
 ```
 Use `make publish-dry-run` to validate, `make publish` (runs `scripts/publish.sh`) for production.

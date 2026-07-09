@@ -29,6 +29,8 @@ echo -e "\n${GREEN}Running checks...${NC}"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+cargo audit
+cargo deny check
 
 # Function to check if crate version already exists
 check_exists() {
@@ -55,8 +57,7 @@ publish_crate() {
 
     echo -e "Publishing ${CRATE_NAME}..."
     # Capture output to check for "already exists" error if API check failed/lagged
-    OUTPUT=$(cargo publish -p "${CRATE_NAME}" --no-verify 2>&1)
-    if [ $? -eq 0 ]; then
+    if OUTPUT=$(cargo publish -p "${CRATE_NAME}" 2>&1); then
         echo -e "${GREEN}Successfully initiated publish for ${CRATE_NAME}. Sleeping 10s for indexing...${NC}"
         sleep 10
         return 0

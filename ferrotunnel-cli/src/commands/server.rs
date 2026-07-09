@@ -20,7 +20,7 @@ pub struct ServerArgs {
     #[arg(long, env = "FERROTUNNEL_TOKEN_FILE")]
     token_file: Option<PathBuf>,
 
-    /// Log level
+    /// Reserved CLI option; set RUST_LOG to configure log filtering
     #[arg(long, default_value = "info", env = "RUST_LOG")]
     log_level: String,
 
@@ -313,7 +313,8 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     registry
         .init_all()
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(anyhow::Error::from_boxed)
+        .context("Failed to initialize plugins")?;
 
     // Run services until shutdown signal
     tokio::select! {

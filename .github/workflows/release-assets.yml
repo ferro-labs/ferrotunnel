@@ -51,7 +51,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --workspace --exclude ferrotunnel-protocol-fuzz
+        run: cargo build --release --target ${{ matrix.target }} --workspace
 
       - name: Prepare Asset (Unix)
         if: matrix.os != 'windows-latest'
@@ -168,7 +168,7 @@ jobs:
           body_path: release-notes.md
           files: artifacts/**/*
           draft: true
-          prerelease: true
+          prerelease: false
           # Keep the changelog excerpt (body_path) AND append GitHub's
           # auto-generated "What's Changed" / "New Contributors" section so
           # contributor @handles are credited on every release.

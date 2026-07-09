@@ -2,8 +2,8 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
 .local-bins/
+/ferrotunnel-protocol/fuzz/Cargo.lock
 
 # IDE
 .idea/

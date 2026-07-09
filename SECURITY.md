@@ -1,143 +1,100 @@
 # Security Policy
 
-## Supported Versions
+## Supported versions
 
-We release patches for security vulnerabilities. Which versions are eligible for receiving such patches depends on the CVSS v3.0 Rating:
+Security fixes are released for the current stable minor line. Users should upgrade to the latest patch in that line.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| Version | Supported |
+| --- | --- |
+| 1.5.x | Yes |
+| < 1.5.0 | No |
 
-## Reporting a Security Vulnerability
+## Report a vulnerability
 
-The FerroTunnel project team takes security issues seriously. We appreciate your efforts to responsibly disclose your findings.
+Do not report security vulnerabilities through public GitHub issues. Use one of these private channels:
 
-### How to Report
+- Email [hello@ferrolabs.ai](mailto:hello@ferrolabs.ai).
+- Use [GitHub private vulnerability reporting](https://github.com/ferro-labs/ferrotunnel/security/advisories/new).
 
-**Please do not report security vulnerabilities through public GitHub issues.**
+Include the affected version or commit, reproduction steps, required configuration, impact, and a proof of concept when one is available. Avoid including secrets or third-party data.
 
-Instead, please report security vulnerabilities by email to:
+## Coordination
 
-**hello@ferrolabs.ai**
+The maintainers use GitHub Security Advisories to coordinate fixes with reporters and affected downstream maintainers. Participation requests may be sent to [hello@ferrolabs.ai](mailto:hello@ferrolabs.ai) with a GitHub username and a brief description of the affected deployment.
 
-Or, if you prefer, you can use GitHub's private vulnerability reporting feature:
+Security fixes are disclosed through:
 
-1. Go to the [Security tab](https://github.com/ferro-labs/ferrotunnel/security)
-2. Click "Report a vulnerability"
-3. Fill in the details
+1. [GitHub Security Advisories](https://github.com/ferro-labs/ferrotunnel/security/advisories)
+2. [GitHub Releases](https://github.com/ferro-labs/ferrotunnel/releases)
+3. [CHANGELOG.md](CHANGELOG.md)
 
-### What to Include
+Dependency vulnerabilities may also be present in the [RustSec Advisory Database](https://rustsec.org/advisories/), which is consumed by the project audit gate.
 
-Please include the following information in your report:
+## Response targets
 
-- Type of issue (e.g., buffer overflow, SQL injection, cross-site scripting, etc.)
-- Full paths of source file(s) related to the manifestation of the issue
-- The location of the affected source code (tag/branch/commit or direct URL)
-- Any special configuration required to reproduce the issue
-- Step-by-step instructions to reproduce the issue
-- Proof-of-concept or exploit code (if possible)
-- Impact of the issue, including how an attacker might exploit it
+- Initial response: within 48 hours
+- Status update: within 7 days
+- Fix timeline: based on severity and exploitability
+- Public disclosure: coordinated after a fix is available
 
-This information will help us triage your report more quickly.
+These are targets rather than service-level guarantees.
 
-## Vulnerability Coordination
+## Automated checks
 
-Remediation of security vulnerabilities is prioritized by the project team. The project team coordinates remediation with third-party stakeholders via [GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories/about-github-security-advisories).
+Every pull request and push to `main` runs:
 
-Third-party stakeholders may include:
-- The reporter of the issue
-- Affected direct or indirect users of FerroTunnel
-- Maintainers of upstream dependencies (if applicable)
+- `cargo audit` through the RustSec audit action for known dependency vulnerabilities
+- `cargo deny check` for advisory, license, source, and dependency policy
+- formatting, lint, test, build, documentation, and fuzz smoke-test gates
 
-### Participation in Coordination
+CodeQL and longer fuzz jobs run on their own schedules.
 
-Downstream project maintainers and FerroTunnel users can request participation in coordination of applicable security issues by sending your contact information to **hello@ferrolabs.ai**.
-
-Please include:
-- Contact email address
-- GitHub username(s)
-- Description of how you use FerroTunnel
-- Any other relevant information
-
-Participation in security issue coordination is at the discretion of the FerroTunnel team.
-
-## Security Advisories
-
-The project team is committed to transparency in the security issue disclosure process.
-
-Security advisories will be published through:
-
-1. **GitHub Security Advisories**: [FerroTunnel Security Advisories](https://github.com/ferro-labs/ferrotunnel/security/advisories)
-2. **RustSec Advisory Database**: Reported via [`cargo-audit`](https://github.com/RustSec/advisory-db)
-3. **GitHub Releases**: Security fixes will be documented in [release notes](https://github.com/ferro-labs/ferrotunnel/releases)
-4. **CHANGELOG.md**: All security-related changes will be clearly marked
-
-## Response Timeline
-
-- **Initial Response**: Within 48 hours of report
-- **Status Update**: Within 7 days of report
-- **Fix Timeline**: Varies by severity (critical issues prioritized)
-- **Public Disclosure**: Coordinated with reporter after fix is available
-
-## Automated Security Checks
-
-This project uses automated security scanning:
-
-- **cargo-audit**: Checks for known vulnerabilities in dependencies
-- **cargo-deny**: Validates licenses and bans problematic crates
-
-These checks run on every pull request and push to main.
-
-### Running Locally
+Run the local security gate with:
 
 ```bash
-# Install tools
-cargo install cargo-audit cargo-deny
-
-# Run security audit
-cargo audit
-
-# Run license and dependency check
-cargo deny check
+cargo install cargo-audit cargo-deny --locked
+make audit
 ```
 
-## Security Best Practices
+## Deployment security
 
-When using FerroTunnel:
+### Transport selection
 
-1. **Keep Updated**: Always use the latest stable version
-2. **TLS Configuration**: Use strong TLS settings (v1.2+)
-3. **Authentication**: Use strong, unique tokens
-4. **Network Security**: Deploy behind firewalls and use network segmentation
-5. **Monitoring**: Enable logging and monitor for suspicious activity
-6. **Dependencies**: Regularly run `cargo audit` to check for vulnerable dependencies
+| Transport | Encryption | Production guidance |
+| --- | --- | --- |
+| TCP | None | Use only on a trusted network or replace it with TLS. |
+| TLS over TCP | rustls TLS | Configure a trusted CA and hostname verification. |
+| QUIC | TLS 1.3 | Configure certificates and keep peer verification enabled. |
 
-## Security Features
+`--tls-skip-verify` and the corresponding QUIC option disable peer authentication. They are intended only for controlled testing and emit a warning.
 
-FerroTunnel is designed with security in mind:
+### Authentication tokens
 
-- 🔒 **No unsafe code**: `unsafe_code = "forbid"` at workspace level
-- 🔐 **TLS by default**: All tunnel traffic encrypted (when implemented)
-- 🎫 **Token-based auth**: Secure authentication system
-- 📊 **Audit logging**: Comprehensive activity logging
-- 🛡️ **Input validation**: All protocol messages validated
-- ⏱️ **Rate limiting**: Protection against DoS attacks
+- Generate a random token of at least 32 bytes. FerroTunnel validates non-empty printable tokens up to 256 bytes, but it does not enforce the 32-byte recommendation.
+- Supply server tokens through `FERROTUNNEL_TOKEN`, `--token-file`, or the secure prompt. The server does not accept a token in process arguments.
+- Store tokens in a secret manager, restrict file permissions, and rotate them after suspected exposure.
+- Use TLS or QUIC so tokens are not sent over plaintext TCP.
 
-## Bug Bounty
+### Dashboard and ingress
 
-Currently, FerroTunnel does not have a paid bug bounty program. However, we deeply appreciate security researchers who report vulnerabilities responsibly. We will publicly acknowledge reporters (with permission) in our security advisories and release notes.
+- Keep the dashboard on its loopback default. Non-loopback dashboard binds require explicit opt-in and an authentication token.
+- Restrict tunnel, HTTP, TCP, HTTP/3, metrics, and dashboard ports with host or network firewall rules.
+- Treat raw TCP ingress as single-tenant in the 1.5.x line; it selects an eligible TCP session without a tenant routing key.
 
-## Safe Harbor
+### Resource limits
 
-We support safe harbor for security researchers who:
+The 1.5.x runtime enforces the configured session ceiling and frame-size validation. Rate limits are enforced on session traffic. `max_streams_per_session` and `max_inflight_frames` are validated configuration fields but are not yet wired into stream admission, so deployments must also use ingress and network-level concurrency controls.
 
-- Make a good faith effort to avoid privacy violations, destruction of data, and interruption or degradation of our service
-- Only interact with accounts you own or for which you have explicit permission
-- Contact us at **hello@ferrolabs.ai** if you encounter any user data during testing
-- Do not exploit vulnerabilities beyond the minimum necessary to confirm their existence
+## Security properties and limits
 
-We will not pursue legal action against researchers who follow these guidelines.
+- Workspace-owned Rust source is built with `unsafe_code = "forbid"`. This does not make claims about unsafe code inside third-party dependencies.
+- Safe Rust prevents common memory corruption and data races, but it does not prevent logical races, denial of service, misconfiguration, or vulnerable dependencies.
+- Authentication uses constant-time comparison after token-format validation.
+- Structured tracing and request logging are available; FerroTunnel does not provide a tamper-resistant audit-log store.
+- TLS is opt-in for TCP. QUIC includes encryption by protocol design.
 
-## Questions?
+## Safe harbor
 
-If you have any questions about this security policy, please contact **hello@ferrolabs.ai**.
+The project will not pursue legal action against researchers who act in good faith, test only systems they own or are authorized to test, avoid privacy violations and service disruption, and disclose only the minimum data required to demonstrate the issue. Contact [hello@ferrolabs.ai](mailto:hello@ferrolabs.ai) if unexpected user data is encountered.
+
+FerroTunnel does not currently offer a paid bug bounty.

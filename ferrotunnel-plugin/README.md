@@ -1,95 +1,89 @@
-# Ferrotunnel Plugin System
+# FerroTunnel Plugin System
 
 [![Crates.io](https://img.shields.io/crates/v/ferrotunnel-plugin.svg)](https://crates.io/crates/ferrotunnel-plugin)
 [![Documentation](https://docs.rs/ferrotunnel-plugin/badge.svg)](https://docs.rs/ferrotunnel-plugin)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](../LICENSE-MIT)
 
-This crate contains the core traits and infrastructure for the Ferrotunnel plugin system.
+This crate provides plugin traits, built-in plugins, and the `PluginRegistry` used by FerroTunnel HTTP ingress.
 
-## Plugin Developer Guide
+## Create a plugin
 
-FerroTunnel supports a trait-based plugin system for intercepting and modifying request/response traffic, authentication, rate limiting, and more.
-
-### Quick Start
-
-To create a new plugin, implement the `Plugin` trait from `ferrotunnel-plugin`.
+Implement `Plugin` and override only the hooks the plugin needs:
 
 ```rust
-use ferrotunnel_plugin::{Plugin, PluginAction, RequestContext, ResponseContext};
 use async_trait::async_trait;
+use ferrotunnel_plugin::{Plugin, PluginAction, RequestContext};
 
-pub struct MyPlugin;
+struct BlockAdmin;
 
 #[async_trait]
-impl Plugin for MyPlugin {
+impl Plugin for BlockAdmin {
     fn name(&self) -> &str {
-        "my-plugin"
+        "block-admin"
     }
 
     async fn on_request(
         &self,
-        req: &mut http::Request<Vec<u8>>,
-        _ctx: &RequestContext,
-    ) -> Result<PluginAction, Box<dyn std::error::Error + Send + Sync + 'static>> {
-        println!("Received request: {}", req.uri());
+        request: &mut http::Request<()>,
+        _context: &RequestContext,
+    ) -> Result<PluginAction, Box<dyn std::error::Error + Send + Sync>> {
+        if request.uri().path() == "/admin" {
+            return Ok(PluginAction::Reject {
+                status: 403,
+                reason: "Access denied".to_string(),
+            });
+        }
+
         Ok(PluginAction::Continue)
     }
 }
 ```
 
-### Plugin Lifecycle
+## Register and run hooks
 
-1. **Init**: Called when the server starts. Use this to set up database connections or other resources.
-2. **Hooks**:
-   - `on_request`: Called before the request is forwarded to the tunnel.
-   - `on_response`: Called after the response is received from the tunnel.
-   - `on_stream_data`: Called when raw data flows through the stream (TCP mode).
-3. **Shutdown**: Called when the server shuts down.
+`PluginRegistry` exposes explicit lifecycle and hook methods:
 
-### Plugin Actions
+```rust,no_run
+use std::sync::Arc;
+use ferrotunnel_plugin::PluginRegistry;
+use tokio::sync::RwLock;
 
-- `PluginAction::Continue`: Allow the request to proceed to the next plugin or target.
-- `PluginAction::Reject { status, reason }`: Stop processing and return an error response immediately.
-- `PluginAction::Respond { status, headers, body }`: Return a custom response immediately.
-- `PluginAction::Modify`: (Upcoming) Modify the request/response extensively.
+# struct BlockAdmin;
+# #[async_trait::async_trait]
+# impl ferrotunnel_plugin::Plugin for BlockAdmin {
+#     fn name(&self) -> &str { "block-admin" }
+# }
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let mut registry = PluginRegistry::new();
+registry.register(Arc::new(RwLock::new(BlockAdmin)));
+registry.init_all().await?;
 
-### Examples
-
-See `ferrotunnel-plugin/src/builtin/` for built-in plugins (Logger, TokenAuth, RateLimit).
-
-Check the `examples/` directory for more:
-- `hello_plugin.rs`: Simple header injection.
-- `header_filter.rs`: Removing sensitive headers.
-- `ip_blocklist.rs`: Blocking requests by IP.
-
-### Testing
-
-You can test plugins in two ways:
-
-1. **Unit Tests**: Mock `RequestContext` and assert on `PluginAction` results.
-   ```rust
-   #[tokio::test]
-   async fn test_my_plugin() {
-       let plugin = MyPlugin::new();
-       let mut req = http::Request::builder().body(vec![]).unwrap();
-       let ctx = RequestContext { ... };
-
-       let action = plugin.on_request(&mut req, &ctx).await.unwrap();
-       assert_eq!(action, PluginAction::Continue);
-   }
-   ```
-
-2. **Run Examples**:
-   ```bash
-   cargo run -p ferrotunnel-plugin --example hello_plugin
-   cargo run -p ferrotunnel-plugin --example header_filter
-   cargo run -p ferrotunnel-plugin --example ip_blocklist
-   ```
-
-### Usage
-
-Register your plugin in `ferrotunnel-cli/src/commands/server.rs`:
-
-```rust
-registry.register(Arc::new(RwLock::new(MyPlugin)));
+// Pass the registry to a lower-level ingress integration, then shut it down
+// when the owning service stops.
+registry.shutdown_all().await?;
+# Ok(())
+# }
 ```
+
+The `on_request` and `on_response` hooks are used by HTTP ingress when it is constructed with this registry. The high-level `ServerBuilder` does not currently expose custom plugin registration, and the running server does not invoke `on_stream_data` automatically. Applications using the registry directly must call `init_all` and `shutdown_all`.
+
+## Actions
+
+- `PluginAction::Continue` passes control to the next plugin.
+- `PluginAction::Reject` stops the chain and returns an error response.
+- `PluginAction::Respond` stops the chain and returns a custom response.
+- `PluginAction::Modify` records that the request or response was modified and continues processing.
+
+## Built-in plugins
+
+See [`src/builtin/`](src/builtin/) for the logger, token-authentication, rate-limit, and circuit-breaker plugins. The crate unit tests demonstrate registry execution, short-circuiting, response buffering, and panic isolation.
+
+## Testing guidance
+
+- Exercise each returned action, including failure paths.
+- Keep hooks non-blocking; move blocking work to `spawn_blocking`.
+- Return errors instead of panicking. The registry isolates request and response hook panics, but normal error handling preserves better diagnostics.
+- Override `needs_response_body` only when response buffering is required.
+
+API details are available on [docs.rs](https://docs.rs/ferrotunnel-plugin).
