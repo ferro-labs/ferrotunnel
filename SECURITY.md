@@ -67,7 +67,7 @@ make audit
 | TLS over TCP | rustls TLS | Configure a trusted CA and hostname verification. |
 | QUIC | TLS 1.3 | Configure certificates and keep peer verification enabled. |
 
-`--tls-skip-verify` and the corresponding QUIC option disable peer authentication. They are intended only for controlled testing and emit a warning.
+`--tls-skip-verify` disables peer authentication for both TLS and QUIC clients; there is no separate QUIC flag. It is intended only for controlled testing and emits a warning.
 
 ### Authentication tokens
 

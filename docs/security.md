@@ -151,10 +151,12 @@ let limits = LimitsConfig {
     ..LimitsConfig::default()
 };
 
+let token = std::env::var("FERROTUNNEL_TOKEN").expect("FERROTUNNEL_TOKEN must be set");
+
 Server::builder()
     .bind("0.0.0.0:7835".parse().expect("valid tunnel bind"))
     .http_bind("0.0.0.0:8080".parse().expect("valid HTTP bind"))
-    .token("replace-with-a-random-token")
+    .token(token)
     .limits(&limits)
     .build()
 # }

@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
             loop {
                 // Connect and hold an authenticated tunnel session
                 if let Err(e) = run_traffic_cycle(&tunnel, &token, &target, &stats).await {
-                    error!("Traffic error (client {}): {}", i, e);
+                    error!("Session error (client {}): {}", i, e);
                     stats.errors.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }

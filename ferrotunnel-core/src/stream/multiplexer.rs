@@ -457,11 +457,7 @@ impl AsyncRead for VirtualStream {
             Poll::Ready(result) => {
                 self.pending_recv = None;
                 match result {
-                    Ok(Ok(Frame::Data {
-                        data: bytes,
-                        end_of_stream: _,
-                        ..
-                    })) => {
+                    Ok(Ok(Frame::Data { data: bytes, .. })) => {
                         let len = std::cmp::min(buf.remaining(), bytes.len());
                         buf.put_slice(&bytes[..len]);
                         if len < bytes.len() {

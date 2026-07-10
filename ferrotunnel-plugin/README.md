@@ -73,7 +73,9 @@ The `on_request` and `on_response` hooks are used by HTTP ingress when it is con
 - `PluginAction::Continue` passes control to the next plugin.
 - `PluginAction::Reject` stops the chain and returns an error response.
 - `PluginAction::Respond` stops the chain and returns a custom response.
-- `PluginAction::Modify` records that the request or response was modified and continues processing.
+- `PluginAction::Modify` is reserved. It carries no modification data yet, and the registry stops the chain on it like any other non-`Continue` action.
+
+Only `Continue` advances to the next plugin. A plugin that mutates the request or response in place should return `Continue`.
 
 ## Built-in plugins
 

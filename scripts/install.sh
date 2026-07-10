@@ -205,7 +205,7 @@ main() {
         echo ""
         echo "  Get started:"
         echo "    ferrotunnel --help"
-        echo "    FERROTUNNEL_TOKEN=change-me ferrotunnel server"
+        echo "    ferrotunnel server  # prompts for the authentication token"
         echo "    ferrotunnel client --server <host>:7835 --local-addr 127.0.0.1:8080 --tunnel-id my-app"
         echo ""
     else

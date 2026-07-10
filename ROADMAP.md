@@ -68,7 +68,7 @@ Exit gate: `make check`, `cargo test --workspace --all-features`, documentation 
 - `main` contains stable, reviewed code and release tags.
 - `release/X.Y.Z` branches prepare a release candidate before merging to `main`.
 - `feature/*` and `fix/*` branches submit focused changes through pull requests.
-- Patch releases remain API-compatible and avoid new runtime behavior.
+- Patch releases remain API-compatible and add no features. They may carry narrowly scoped maintenance fixes that change observable behavior, such as preserving a plugin initialization error chain; each is recorded in the changelog.
 - User-visible changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Required quality gates

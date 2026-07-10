@@ -19,8 +19,8 @@ VERSION=$(grep -E '^\s*version\s*=\s*"' Cargo.toml | head -1 | sed -E 's/.*versi
 echo -e "Publishing version: ${GREEN}${VERSION}${NC}"
 
 # Upper bound on crates.io index propagation between dependency groups.
-# The API can still lead the CDN-cached index by a few seconds; a failed group
-# is safe to retry because publish_crate skips versions that already exist.
+# A failed group is safe to retry because publish_crate skips versions that
+# already exist.
 INDEX_POLL_ATTEMPTS=30
 INDEX_POLL_INTERVAL=5
 
@@ -52,18 +52,26 @@ check_exists() {
     return 1 # Does not exist or error
 }
 
-# Block until a freshly published version is visible, so the next crate's
-# verification build can resolve it from crates.io instead of a stale index.
+# Resolve an exact version through Cargo's registry index. The crates.io HTTP
+# API can report a version before the sparse index serves it, and the index is
+# what the next crate's verification build actually reads.
+registry_resolves() {
+    CRATE_NAME=$1
+    cargo info "${CRATE_NAME}@${VERSION}" >/dev/null 2>&1
+}
+
+# Block until a freshly published version is resolvable, so the next crate's
+# verification build does not fail against a stale index.
 wait_for_index() {
     CRATE_NAME=$1
     for _ in $(seq 1 "${INDEX_POLL_ATTEMPTS}"); do
-        if check_exists "${CRATE_NAME}"; then
+        if check_exists "${CRATE_NAME}" && registry_resolves "${CRATE_NAME}"; then
             return 0
         fi
         sleep "${INDEX_POLL_INTERVAL}"
     done
 
-    echo -e "${RED}Timed out waiting for ${CRATE_NAME} v${VERSION} to appear on crates.io${NC}"
+    echo -e "${RED}Timed out waiting for Cargo to resolve ${CRATE_NAME} v${VERSION}${NC}"
     return 1
 }
 
