@@ -31,7 +31,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   compliance-check:
     name: Compliance & Security Check
@@ -39,17 +39,16 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      checks: write
     steps:
       - uses: actions/checkout@v6
-      - name: Run RustSec advisory audit
-        uses: rustsec/audit-check@v2.0.0
+      # cargo-deny reads the RustSec advisory database, so `advisories` covers the
+      # same vulnerability set as cargo-audit without a write-scoped token, which
+      # pull requests from forks never receive.
+      - name: Run advisory and dependency policy checks
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
- 
+          command: check advisories bans licenses sources
+
   build-release:
     name: Release Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -67,8 +66,8 @@ jobs:
         with:
           key: ci-${{ matrix.os }}
       - name: Build (ci profile)
-        run: cargo build --workspace --all-features --profile ci
-  
+        run: cargo build --locked --workspace --all-features --profile ci
+
   test:
     name: Tests (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
@@ -92,7 +91,7 @@ jobs:
         with:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
   test-msrv:
     name: Tests (ubuntu, MSRV 1.91)
@@ -107,7 +106,7 @@ jobs:
         with:
           key: test-ubuntu-msrv
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
   test-beta:
     name: Tests (ubuntu, beta)
@@ -122,7 +121,7 @@ jobs:
         with:
           key: test-ubuntu-beta
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
   docs:
     name: Documentation
@@ -137,7 +136,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --locked --workspace --all-features --no-deps
 
   # ==========================================================================
   # Fuzz smoke test
@@ -154,7 +153,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
       - uses: swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
       - name: Run Fuzzer (Smoke Check)
         run: cd ferrotunnel-protocol && cargo +nightly fuzz run codec_decode --sanitizer=none -- -max_total_time=30
 

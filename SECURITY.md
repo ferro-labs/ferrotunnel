@@ -43,9 +43,10 @@ These are targets rather than service-level guarantees.
 
 Every pull request and push to `main` runs:
 
-- `cargo audit` through the RustSec audit action for known dependency vulnerabilities
-- `cargo deny check` for advisory, license, source, and dependency policy
+- `cargo deny check advisories bans licenses sources` for RustSec advisories, licenses, sources, and dependency policy
 - formatting, lint, test, build, documentation, and fuzz smoke-test gates
+
+Builds and tests run with `--locked` so the committed lockfile is the audited dependency set.
 
 CodeQL and longer fuzz jobs run on their own schedules.
 

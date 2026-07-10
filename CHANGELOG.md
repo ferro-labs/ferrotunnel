@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.1] - 2026-07-11
+## [1.5.1] - 2026-07-10
 
 Maintenance release restoring reproducible dependency and release gates and aligning public documentation with the 1.5.x runtime.
 
@@ -15,14 +15,16 @@ Maintenance release restoring reproducible dependency and release gates and alig
 
 - Update `crossbeam-epoch` to 0.9.20 to resolve RUSTSEC-2026-0204.
 - Update `anyhow` to 1.0.103 and `rand` to 0.9.3 to clear the remaining RustSec unsoundness notices.
-- Track `Cargo.lock` for reproducible CLI and release-asset builds.
-- Run cargo-audit and all-feature cargo-deny policy in the required CI compliance gate.
+- Track `Cargo.lock` and build, test, and publish with `--locked` so the committed lockfile is the audited dependency set.
+- Run all-feature RustSec advisory, license, source, and ban policy checks in the required CI compliance gate.
 
 ### Changed
 
 - Require the Rust 1.91 test job in the aggregate CI gate while retaining beta as an allowed signal.
-- Validate package metadata and contents for all eight published crates before release.
-- Run dependency security checks before the production publish script uploads crates.
+- Build and verify publish archives for all eight published crates before release.
+- Run dependency security checks before the production publish script uploads crates, and wait for each crate to appear on crates.io before publishing its dependents.
+- Preserve the underlying error chain when server plugin initialization fails, instead of flattening it to a single message.
+- Publish release assets as full GitHub releases rather than pre-releases. Releases are still created as drafts.
 - Correct roadmap, security, plugin, soak, installer, workflow, and QUIC 0-RTT documentation.
 - Update workspace and internal dependency versions to 1.5.1.
 

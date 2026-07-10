@@ -59,7 +59,7 @@ bench:
 audit:
 	@echo "Running security audit..."
 	cargo audit
-	cargo deny check
+	cargo deny check advisories bans licenses sources
 
 # Run fuzz tests (smoke test)
 fuzz:
@@ -97,19 +97,10 @@ install-tools:
 	rustup component add rustfmt clippy
 	cargo install cargo-audit cargo-deny cargo-fuzz
 
-# Validate package metadata and contents for all crates in dependency order.
-# Verification builds run separately because unpublished workspace dependency
-# versions are not available from crates.io until the production publish step.
+# Build package archives and verify their extracted publish-form sources.
 publish-dry-run:
 	@echo "Validating publishable crate packages..."
-	cargo package -p ferrotunnel-common --allow-dirty --list
-	cargo package -p ferrotunnel-protocol --allow-dirty --list
-	cargo package -p ferrotunnel-plugin --allow-dirty --list
-	cargo package -p ferrotunnel-observability --allow-dirty --list
-	cargo package -p ferrotunnel-core --allow-dirty --list
-	cargo package -p ferrotunnel-http --allow-dirty --list
-	cargo package -p ferrotunnel --allow-dirty --list
-	cargo package -p ferrotunnel-cli --allow-dirty --list
+	./scripts/verify-packages.sh
 
 # Publish release manually
 publish:

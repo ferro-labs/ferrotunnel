@@ -25,7 +25,8 @@ cargo run -p ferrotunnel-soak -- \
     --duration 60
 ```
 
-If the server is unavailable, connection failures are counted and retried after five seconds.
+Any failed session cycle increments the error count and is retried after five seconds. Server
+unavailability is one such failure.
 
 ## Arguments
 

@@ -23,8 +23,7 @@ These examples are illustrative, not an exhaustive CVE count. Each advisory has 
 component, configuration, and exploitability. They show why memory safety matters, but they do
 not prove that choosing Rust alone would prevent every exact root cause.
 
-Advisory summaries were checked on 2026-07-10. Follow the linked records for current scope and
-status.
+Follow the linked advisory records for their current scope and status.
 
 ### Safe Rust guarantees and remaining risks
 
@@ -180,7 +179,9 @@ cargo install cargo-audit cargo-deny --locked
 make audit
 ```
 
-`cargo audit` checks the lockfile against RustSec advisories. `cargo deny check` applies advisory, license, source, and duplicate-dependency policy across all features.
+`cargo audit` checks the lockfile against RustSec advisories. `cargo deny check advisories bans
+licenses sources` applies advisory, license, source, and duplicate-dependency policy across all
+features. Continuous integration runs the cargo-deny gate; `make audit` runs both tools.
 
 ## Deployment checklist
 

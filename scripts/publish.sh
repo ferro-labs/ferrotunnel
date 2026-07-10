@@ -18,6 +18,12 @@ fi
 VERSION=$(grep -E '^\s*version\s*=\s*"' Cargo.toml | head -1 | sed -E 's/.*version\s*=\s*"([^"]+)".*/\1/')
 echo -e "Publishing version: ${GREEN}${VERSION}${NC}"
 
+# Upper bound on crates.io index propagation between dependency groups.
+# The API can still lead the CDN-cached index by a few seconds; a failed group
+# is safe to retry because publish_crate skips versions that already exist.
+INDEX_POLL_ATTEMPTS=30
+INDEX_POLL_INTERVAL=5
+
 # Check for uncommitted changes
 if [ -n "$(git status --porcelain)" ]; then
     echo -e "${RED}Error: Working directory is not clean. Please commit changes first.${NC}"
@@ -27,10 +33,10 @@ fi
 # Run checks
 echo -e "\n${GREEN}Running checks...${NC}"
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 cargo audit
-cargo deny check
+cargo deny check advisories bans licenses sources
 
 # Function to check if crate version already exists
 check_exists() {
@@ -46,6 +52,21 @@ check_exists() {
     return 1 # Does not exist or error
 }
 
+# Block until a freshly published version is visible, so the next crate's
+# verification build can resolve it from crates.io instead of a stale index.
+wait_for_index() {
+    CRATE_NAME=$1
+    for _ in $(seq 1 "${INDEX_POLL_ATTEMPTS}"); do
+        if check_exists "${CRATE_NAME}"; then
+            return 0
+        fi
+        sleep "${INDEX_POLL_INTERVAL}"
+    done
+
+    echo -e "${RED}Timed out waiting for ${CRATE_NAME} v${VERSION} to appear on crates.io${NC}"
+    return 1
+}
+
 # Function to publish a single crate
 publish_crate() {
     CRATE_NAME=$1
@@ -57,10 +78,12 @@ publish_crate() {
 
     echo -e "Publishing ${CRATE_NAME}..."
     # Capture output to check for "already exists" error if API check failed/lagged
-    if OUTPUT=$(cargo publish -p "${CRATE_NAME}" 2>&1); then
-        echo -e "${GREEN}Successfully initiated publish for ${CRATE_NAME}. Sleeping 10s for indexing...${NC}"
-        sleep 10
-        return 0
+    if OUTPUT=$(cargo publish -p "${CRATE_NAME}" --locked 2>&1); then
+        echo -e "${GREEN}Successfully initiated publish for ${CRATE_NAME}. Waiting for crates.io to index it...${NC}"
+        if wait_for_index "${CRATE_NAME}"; then
+            return 0
+        fi
+        return 1
     elif echo "$OUTPUT" | grep -q "already exists"; then
         echo -e "${GREEN}${CRATE_NAME} v${VERSION} already exists (caught by cargo), skipping.${NC}"
         return 0
