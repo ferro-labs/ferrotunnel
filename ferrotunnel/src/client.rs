@@ -67,7 +67,7 @@ impl Client {
     ///     .server_addr("localhost:7835")
     ///     .token("secret")
     ///     .build()
-    ///     .unwrap();
+    ///     .expect("valid client configuration");
     /// ```
     #[must_use]
     pub fn builder() -> ClientBuilder {
@@ -391,8 +391,8 @@ impl ClientBuilder {
     /// Configure QUIC transport for the client.
     ///
     /// When enabled, the client will connect to the server using QUIC.
-    /// QUIC provides built-in encryption, native stream multiplexing,
-    /// and optional 0-RTT reconnection.
+    /// QUIC provides built-in encryption and native stream multiplexing.
+    /// The 0-RTT option currently falls back to a full handshake.
     #[cfg(feature = "quic")]
     #[must_use]
     pub fn quic(mut self, config: &ferrotunnel_common::QuicConfig) -> Self {

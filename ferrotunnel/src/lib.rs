@@ -43,8 +43,8 @@
 //! #[tokio::main]
 //! async fn main() -> ferrotunnel::Result<()> {
 //!     let mut server = Server::builder()
-//!         .bind("0.0.0.0:7835".parse().unwrap())
-//!         .http_bind("0.0.0.0:8080".parse().unwrap())
+//!         .bind("0.0.0.0:7835".parse().expect("valid tunnel bind"))
+//!         .http_bind("0.0.0.0:8080".parse().expect("valid HTTP bind"))
 //!         .token("my-secret-token")
 //!         .build()?;
 //!

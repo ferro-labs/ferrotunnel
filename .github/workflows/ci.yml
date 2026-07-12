@@ -23,15 +23,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: rustfmt, clippy
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   compliance-check:
     name: Compliance & Security Check
@@ -40,11 +42,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          command: check
- 
+          persist-credentials: false
+      # cargo-deny reads the RustSec advisory database, so `advisories` covers the
+      # same vulnerability set as cargo-audit without a write-scoped token, which
+      # pull requests from forks never receive.
+      - name: Run advisory and dependency policy checks
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check advisories bans licenses sources
+
   build-release:
     name: Release Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -56,18 +64,22 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ci-${{ matrix.os }}
       - name: Build (ci profile)
-        run: cargo build --workspace --all-features --profile ci
-  
+        run: cargo build --locked --workspace --all-features --profile ci
+
   test:
     name: Tests (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -79,34 +91,55 @@ jobs:
           - os: windows-latest
             rust: stable
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: ${{ matrix.rust }}
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
-  test-extra:
-    name: Tests (ubuntu, ${{ matrix.rust }})
+  test-msrv:
+    name: Tests (ubuntu, MSRV 1.91)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [beta, "1.91"]
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          toolchain: ${{ matrix.rust }}
-      - uses: swatinem/rust-cache@v2
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          key: test-ubuntu-${{ matrix.rust }}
+          toolchain: "1.91"
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: test-ubuntu-msrv
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
+
+  test-beta:
+    name: Tests (ubuntu, beta)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: beta
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: test-ubuntu-beta
+      - name: Run tests
+        run: cargo test --locked --workspace --all-features
 
   docs:
     name: Documentation
@@ -117,11 +150,13 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --locked --workspace --all-features --no-deps
 
   # ==========================================================================
   # Fuzz smoke test
@@ -133,12 +168,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install Rust Nightly
-        uses: dtolnay/rust-toolchain@nightly
-      - uses: swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
       - name: Run Fuzzer (Smoke Check)
         run: cd ferrotunnel-protocol && cargo +nightly fuzz run codec_decode --sanitizer=none -- -max_total_time=30
 
@@ -166,13 +203,17 @@ jobs:
       - compliance-check
       - build-release
       - test
+      - test-msrv
+      - test-beta
       - docs
       - fuzz-smoke-test
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - name: Decide whether all jobs succeeded
-        uses: re-actors/alls-green@release/v1
+        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
-          allowed-failures: test-extra
+          allowed-failures: test-beta
           jobs: ${{ toJSON(needs) }}

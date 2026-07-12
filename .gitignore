@@ -2,8 +2,8 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
 .local-bins/
+/ferrotunnel-protocol/fuzz/Cargo.lock
 
 # IDE
 .idea/
@@ -32,6 +32,9 @@ ferrotunnel-protocol/fuzz/corpus/
 
 #extra
 extra/
+
+# Graphify Out
+graphify-out
 
 # Config files (may contain secrets)
 *.toml.local

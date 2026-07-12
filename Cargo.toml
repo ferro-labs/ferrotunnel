@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.5.0"
+version = "1.5.1"
 edition = "2021"
 rust-version = "1.91"
 authors = ["Mitul Shah <hello@ferrolabs.ai>"]
@@ -53,7 +53,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Logging
 tracing = "0.1"
-ferrotunnel-observability = { version = "1.5.0", path = "ferrotunnel-observability" }
+ferrotunnel-observability = { version = "1.5.1", path = "ferrotunnel-observability" }
 
 # QUIC transport
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }

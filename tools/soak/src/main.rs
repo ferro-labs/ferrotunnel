@@ -1,6 +1,6 @@
 //! FerroTunnel Soak Testing Tool
 //!
-//! Runs continuous traffic against a target to verify stability over long durations.
+//! Cycles tunnel-client sessions and records long-running process metrics.
 
 use anyhow::Result;
 use clap::Parser;
@@ -18,7 +18,7 @@ use tracing::{error, info};
 #[command(name = "ferrotunnel-soak")]
 #[command(about = "Soak testing tool for FerroTunnel")]
 struct Args {
-    /// Target server address
+    /// Reserved target address for future through-tunnel traffic
     #[arg(long, default_value = "127.0.0.1:9999")]
     target: String,
 
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
         errors: AtomicU64::new(0),
     });
 
-    // Start background traffic generators
+    // Start background session workers
     let mut handles = Vec::new();
     for i in 0..args.concurrency {
         let stats = stats.clone();
@@ -84,9 +84,9 @@ async fn main() -> Result<()> {
 
         let handle = tokio::spawn(async move {
             loop {
-                // Connect and send some traffic
+                // Connect and hold an authenticated tunnel session
                 if let Err(e) = run_traffic_cycle(&tunnel, &token, &target, &stats).await {
-                    error!("Traffic error (client {}): {}", i, e);
+                    error!("Session error (client {}): {}", i, e);
                     stats.errors.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -155,11 +155,11 @@ async fn run_traffic_cycle(tunnel: &str, token: &str, _target: &str, stats: &Sta
     // Start client in background
     let _info = client.start().await?;
 
-    // In a real soak test, we'd also want to generate traffic THROUGH the tunnel
-    // For now, we simulate session duration
+    // Through-tunnel application traffic is not generated yet
+    // Hold each session for a fixed cycle duration
     let traffic_duration = Duration::from_mins(5); // 5 mins per connection
 
-    // Simulate some bytes
+    // Advance the synthetic progress counter
     stats.total_bytes.fetch_add(1024 * 1024, Ordering::Relaxed);
 
     tokio::time::sleep(traffic_duration).await;

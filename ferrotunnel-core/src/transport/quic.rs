@@ -1,7 +1,7 @@
 //! QUIC transport using quinn
 //!
-//! Provides QUIC-based connections with built-in TLS 1.3 encryption,
-//! native stream multiplexing, and optional 0-RTT reconnection.
+//! Provides QUIC-based connections with built-in TLS 1.3 encryption and
+//! native stream multiplexing. The 0-RTT option currently uses a full handshake.
 
 use super::tls;
 use ferrotunnel_common::QuicConfig;

@@ -10,7 +10,8 @@ pub enum PluginAction {
     /// Reject the request with status and reason
     Reject { status: u16, reason: String },
 
-    /// Modify and continue
+    /// Reserved for in-place modification. It carries no modification data yet,
+    /// and the registry stops the hook chain on it as with any non-`Continue` action.
     Modify {
         // Placeholder for modification logic
     },

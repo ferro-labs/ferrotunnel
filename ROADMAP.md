@@ -1,145 +1,97 @@
 # FerroTunnel Development Roadmap
 
-Embeddable, extensible, and observable reverse tunnel for Rust developers.
+FerroTunnel is an embeddable reverse tunnel for Rust applications, with a CLI, hostname-based HTTP routing, raw TCP ingress, plugins, and optional observability.
 
----
+This roadmap records shipped capability and the intended order of future releases. It does not promise delivery dates.
 
-## Vision
+## Shipped baseline
 
-**FerroTunnel** is not just another tunnel - it's the **embeddable**, **extensible**, and **observable** reverse tunnel for Rust developers.
+| Release | Outcome |
+| --- | --- |
+| v1.0.0 | Stable protocol, tunnel runtime, HTTP and TCP ingress, plugin primitives, dashboard, observability, and unified CLI. |
+| v1.0.1 | Packaging, tunnel identifiers, ingress routing fixes, and benchmark tooling. |
+| v1.0.2 | WebSocket tunneling and graceful CLI shutdown. |
+| v1.0.3 | HTTP/2 ingress and HTTP/1.1 and HTTP/2 connection pooling. |
+| v1.0.6 | gRPC tunneling over HTTP/2 with trailer preservation. |
+| v1.0.7 | Optional QUIC tunnel transport with native stream multiplexing and TLS 1.3. The 0-RTT option is reserved and currently uses a full handshake. |
+| v1.0.8 | Optional browser-facing HTTP/3 ingress with Alt-Svc discovery. |
+| v1.1.0-v1.5.0 | Security, resource, lifecycle, concurrency, protocol, configuration, and public-API hardening. |
 
-### Core Differentiators
+## Current release
 
-🎯 **Library-First** - Published to crates.io, embedded in your apps
-🎯 **Plugin System** - Trait-based extensibility for custom behavior
-🎯 **Built-in Dashboard** - Real-time WebUI for monitoring
+### v1.5.1 - Maintenance
 
----
+- Update vulnerable and unsound dependency versions recorded in the lockfile.
+- Run both RustSec and cargo-deny checks in the required CI gate.
+- Reconcile the remaining audit checklist and move behavior changes to their owning future release.
+- Correct security, plugin, soak, QUIC 0-RTT, release, and workflow documentation.
+- Validate all published crate packages and release metadata.
 
-## Version Strategy
+Exit gate: `make check`, `cargo test --workspace --all-features`, documentation with warnings denied, `make audit`, and `make publish-dry-run`.
 
-### Stable
+## Planned releases
 
-- **v1.0.0** - First stable release ✅
-  - Protocol, tunnel, HTTP/TCP ingress, plugin system, observability, dashboard, unified CLI
-  - Published to crates.io
+### v1.6.x - Runtime correctness and operations
 
-- **v1.0.1** - Stability & Developer Experience ✅
-  - Homebrew formula, Docker optimization (13.4 MB image)
-  - `--tunnel-id` CLI flag and `.tunnel_id()` builder method
-  - HTTP ingress routing fix, performance benchmarks vs. alternatives
-  - **Goal**: Convert evaluators → users → advocates
+- Add explicit tenant routing for raw TCP ingress.
+- Enforce configured per-session stream and in-flight frame ceilings.
+- Wire reconnect backoff, heartbeat deadlines, and resource cleanup through runtime paths.
+- Expose custom plugin registration and complete plugin lifecycle integration.
+- Add certificate reload, CLI logging configuration, and real through-tunnel soak coverage.
 
-- **v1.0.2** - WebSocket Tunneling & Graceful Shutdown ✅
-  - Full WebSocket tunnel support (upgrade detection, bidirectional bridging)
-  - Graceful shutdown for CLI server and client (Ctrl-C / SIGTERM handling)
-  - Real-time application compatibility (chat, dashboards, gaming)
-  - **Market Impact**: Opens to entire real-time application developer segment
+### v1.7.x - AI workload connectivity
 
-- **v1.0.3** - HTTP/2 Support & Connection Pooling ✅
-  - HTTP/2 ingress and client proxy with automatic protocol detection
-  - Connection pooling for both HTTP/1.1 and HTTP/2
-  - Background connection eviction for resource efficiency
-  - **Value**: Modern web baseline, enterprise credibility, improved performance
+- Add streaming-safe plugin hooks and long-running stream presets.
+- Support ephemeral SDK tunnels and common local model and MCP workflows.
+- Add per-tunnel authorization and stream-focused telemetry.
 
-- **v1.0.6** - gRPC Support ✅
-  - Native gRPC tunneling over HTTP/2 with automatic detection and trailer preservation
-  - **Target Audience**: Enterprise and microservices developers
+### v1.8.x - Edge deployments
 
-- **v1.0.7** - QUIC Transport ✅
-  - QUIC tunnel transport using quinn 0.11 (behind `quic` feature flag)
-  - Native QUIC stream multiplexing (no head-of-line blocking)
-  - 0-RTT reconnection support, built-in TLS 1.3
-  - CLI flags: `--quic-bind` (server), `--quic` / `--quic-0rtt` (client)
-  - **Differentiator**: Next-gen transport for competitive advantage
+- Publish client-focused ARM artifacts and service packaging.
+- Add device identity, authorization, and fleet-safe credential handling.
+- Improve recovery across roaming and intermittent links.
 
-- **v1.1.0 – v1.5.0** - Security & Reliability Hardening ✅
-  - Audit-driven hardening across dashboard/TLS auth (v1.1.0), ingress and
-    session-resource limits (v1.2.0), concurrency and lifecycle correctness
-    (v1.3.0), wire-protocol and configuration hardening (v1.4.0), and public-API
-    encapsulation with authentication-token redaction (v1.5.0)
-  - **Value**: Production-grade robustness ahead of the API-stabilization window
+### v1.9.x - High availability and custom routing
 
-### Planned
+- Add shared session ownership and cross-node stream forwarding.
+- Support graceful node drain and health-aware routing.
+- Add verified custom-domain aliases after distributed ownership is available.
 
-> **Strategy**: Prioritize features that maximize user adoption and "time to first success"
+### v2.0.x - Protocol evolution
 
-- **v1.0.8** - HTTP/3 Ingress
-  - HTTP/3 ingress using h3 + h3-quinn (accept HTTP/3 from browsers)
-  - Alt-Svc header injection for automatic HTTP/3 upgrade
-  - **Value**: Complete HTTP/3 story (QUIC transport + HTTP/3 ingress)
+- Add forward-compatible frame extensions.
+- Add QUIC datagrams and UDP relay.
+- Add routing groups and cross-stream flow control where wire changes require a major release.
 
-- **v1.0.9** - Multi-region Support
-  - Geographic load balancing
-  - Regional failover capabilities
+## Release policy
 
-- **v1.0.10** - Custom Domains
-  - Custom domain mapping for white-label deployments
+- `main` contains stable, reviewed code and release tags.
+- `release/X.Y.Z` branches prepare a release candidate before merging to `main`.
+- `feature/*` and `fix/*` branches submit focused changes through pull requests.
+- Patch releases remain API-compatible and add no features. They may carry narrowly scoped maintenance fixes that change observable behavior, such as preserving a plugin initialization error chain; each is recorded in the changelog.
+- User-visible changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
-- **v2.0.0** - Breaking Changes (if needed)
-  - Protocol improvements based on v1.x learnings
+## Required quality gates
 
----
+The required CI path covers:
 
-## Comparison with Alternatives
+- formatting and Clippy with warnings denied;
+- release-profile builds on Linux, macOS, and Windows;
+- all-feature tests on stable Rust and the minimum supported Rust version;
+- optional beta Rust signal;
+- RustSec and cargo-deny dependency policy;
+- rustdoc with warnings denied;
+- protocol fuzz smoke tests.
 
-| Feature | Rathole | frp | FerroTunnel |
-|---------|---------|-----|-------------|
-| Language | Rust | Go | Rust |
-| Embeddable | ❌ | ❌ | ✅ crates.io library |
-| Plugin System | ❌ | Limited | ✅ Trait-based |
-| Dashboard | ❌ | Basic | ✅ Built-in WebUI |
-| Request Inspector | ❌ | ❌ | ✅ Built-in |
-| OpenTelemetry | ❌ | ❌ | ✅ Built-in |
-| Memory Efficiency | — | ~300MB/1k tunnels | ~100MB/1k tunnels |
-| License | Apache-2.0 | Apache-2.0 | MIT OR Apache-2.0 |
+Scheduled CodeQL analysis and longer fuzz runs provide additional coverage. Release candidates also validate the package contents for every published crate.
 
----
+## Technical targets
 
-## Success Metrics
+These are measurement targets, not guarantees:
 
-### Technical Targets
+- less than 5 ms tunnel overhead in the reference benchmark;
+- bounded memory under the documented session and frame limits;
+- no crashes during a seven-day through-tunnel soak run;
+- predictable recovery after connection loss without a reconnect surge.
 
-- **Performance**: < 5ms latency overhead vs raw TCP
-- **Scalability**: 10k concurrent streams per server
-- **Efficiency**: < 100MB memory for 1000 tunnels
-- **Reliability**: Zero crashes in 7-day soak test
-
-### Differentiation Validation
-
-- ✅ **Only embeddable** Rust tunnel (crates.io)
-- ✅ **Most extensible** via plugin system
-- ✅ **Best observability** with built-in dashboard
-
----
-
-## Development Workflow
-
-### Branch Strategy
-
-- `main` - Stable, tagged releases
-- `develop` - Integration branch
-- `feature/*` - Feature branches
-- `fix/*` - Bug fix branches
-
-### Release Process
-
-1. Development on `feature/*` branches
-2. Merge to `develop` via PR
-3. Integration testing on `develop`
-4. Tag release from `develop` → `main`
-5. Publish to crates.io
-6. Create GitHub release
-
-### CI/CD Pipeline
-
-```yaml
-# .github/workflows/ci.yml
-- Cargo check
-- Cargo test (all features)
-- Cargo clippy (deny warnings)
-- Cargo fmt --check
-- Cargo audit (dependency security)
-- Cargo doc (documentation build)
-- Coverage report (codecov)
-```
+Benchmark and soak results must identify the version, host, workload, transport, and configuration used.

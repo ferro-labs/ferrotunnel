@@ -101,7 +101,7 @@ pub struct QuicConfig {
     pub ca_cert_path: Option<PathBuf>,
     /// Server name for SNI (client-side)
     pub server_name: Option<String>,
-    /// Enable 0-RTT for faster reconnection (vulnerable to replay — use with caution)
+    /// Request 0-RTT on reconnect; currently falls back to a full handshake
     pub enable_0rtt: bool,
     /// Maximum idle timeout in seconds (default: 30)
     pub max_idle_timeout_secs: Option<u64>,

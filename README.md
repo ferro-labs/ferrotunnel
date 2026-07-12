@@ -9,7 +9,7 @@
 
 **High-performance reverse tunnel you can embed in your Rust applications.**
 
-FerroTunnel multiplexes streams over a single connection (like ngrok/Cloudflare Tunnel) but ships as a **library-first** crate. Expose local services behind NAT, route HTTP by hostname, intercept requests with plugins with minimal memory footprint and sub-millisecond latency. Works as CLI or `Client::builder()` API. Written in Rust.
+FerroTunnel multiplexes streams over a single connection and ships as a library-first Rust crate. Expose local services behind NAT, route HTTP by hostname, and run it through the CLI or the `Client::builder()` API.
 
 
 ## Prerequisites
@@ -47,7 +47,7 @@ ferrotunnel client --server localhost:7835 --local-addr 127.0.0.1:8080 --tunnel-
 
 ```toml
 [dependencies]
-ferrotunnel = "1.0"
+ferrotunnel = "1.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -163,7 +163,7 @@ ferrotunnel client --server 127.0.0.1:7836 --quic --tls-skip-verify
 
 ```rust
 use ferrotunnel::Client;
-use ferrotunnel_common::QuicConfig;
+use ferrotunnel::common::QuicConfig;
 
 #[tokio::main]
 async fn main() -> ferrotunnel::Result<()> {
@@ -258,7 +258,7 @@ async fn main() -> ferrotunnel::Result<()> {
 | **Connection Pooling** | Efficient connection reuse for improved performance |
 | **Plugin System** | Auth, rate limiting, logging, circuit breaker |
 | **Dashboard** | Real-time WebUI at `localhost:4040` |
-| **TLS 1.3** | Secure connections with rustls |
+| **TLS** | Optional verified TLS connections with rustls |
 | **Mutual TLS** | Client certificate authentication |
 | **Observability** | Prometheus metrics + OpenTelemetry tracing |
 | **WebSocket** | Transparent WebSocket upgrade tunneling |
@@ -271,38 +271,57 @@ async fn main() -> ferrotunnel::Result<()> {
 
 **Choose FerroTunnel when**: You need many services over a single connection, HTTP routing, plugins, or resource efficiency.
 
-See [Architecture](/docs/ARCHITECTURE.md) for detailed analysis of the multiplexing trade-off.
+See [Architecture](docs/ARCHITECTURE.md) for detailed analysis of the multiplexing trade-off.
 
 ## Security: Why Rust Matters
 
-Traditional C/C++ tunneling solutions (OpenSSH, OpenVPN, stunnel) have suffered from **30+ critical memory safety vulnerabilities** over the past decade—buffer overflows, use-after-free, double-free, race conditions, and heap corruption.
+FerroTunnel is built in Rust, and every workspace-owned crate forbids `unsafe` code. In that
+code, Rust's ownership and type system prevent common memory-corruption defects, including
+use-after-free, double-free, and data races, at compile time. This narrows the attack surface of
+a network-facing service without replacing dependency review, secure configuration, or
+operational controls.
 
-**FerroTunnel eliminates these entire vulnerability classes at compile time** using Rust's ownership system:
+**Security features:**
 
-- ✅ **Zero unsafe code** (`#![forbid(unsafe)]` at workspace level)
-- ✅ **Memory safety guaranteed** (no buffer overflows, use-after-free, double-free)
-- ✅ **Thread safety enforced** (no data races possible)
-- ✅ **Pure Rust crypto** (rustls instead of OpenSSL—zero legacy vulnerabilities)
+- **Safe project code** - `unsafe_code = "forbid"` is enforced across workspace-owned crates.
+- **Protected transports** - Verified TLS is available for TCP, mutual TLS is supported, and
+  QUIC always uses TLS 1.3.
+- **Hardened authentication** - Shared tokens are format-validated and compared in constant
+  time.
+- **Bounded traffic** - Session ceilings, protocol frame-size validation, and session rate
+  limits are enforced.
+- **Protected dashboard** - Dashboard access defaults to loopback, with authentication required
+  for non-loopback access.
+- **Automated checks** - CI runs RustSec advisory checks, cargo-deny policy checks, tests, lints,
+  documentation builds, and fuzz smoke tests.
 
-**Security Features:**
-- TLS 1.3-only enforcement with mutual TLS support
-- Token-based authentication with constant-time comparison
-- Built-in rate limiting and frame size limits
-- Automated dependency scanning (`cargo-audit` in CI)
+**Why it matters:** Memory-corruption bugs can turn malformed network input into crashes or code
+execution. Rust prevents many of those failure modes in FerroTunnel's safe project code, while
+the project continues to test and audit the risks the language does not eliminate.
 
-See [docs/security.md](docs/security.md) for detailed CVE comparison, vulnerability analysis, and security best practices.
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and
+[docs/security.md](docs/security.md) for deployment guidance and security boundaries.
 
 ## Ideal For
 
-FerroTunnel's **memory-safe architecture** and **minimal resource footprint** make it perfect for security-critical and resource-constrained environments:
+FerroTunnel is a strong fit when its embeddable Rust API, multiplexed streams, and deployment
+controls match the workload:
 
-- 🔐 **Crypto & Blockchain Infrastructure** - High security requirements, integrates seamlessly with Rust blockchain ecosystems (Solana, Polkadot, Cosmos)
-- 📡 **IoT Devices** - Low memory overhead (<100MB/1k tunnels), zero memory vulnerabilities, ideal for edge gateways and smart devices
-- ⚡ **Edge Computing** - Sub-millisecond latency, efficient resource usage, compile-time safety guarantees
-- 🖥️ **Embedded Systems** - No garbage collector, predictable performance, cross-compilation friendly
-- 🏢 **Enterprise Security** - Zero unsafe code, automated dependency scanning, compliance-ready audit trails
+- 🔐 **Crypto and blockchain infrastructure** - Rust-based services that need authenticated
+  tunnels, mutual TLS, plugins, and observability.
+- 📡 **IoT gateways** - Native deployments that benefit from no managed garbage collector,
+  configurable resource limits, and a small measured connection footprint.
+- ⚡ **Edge computing** - Hostname-based HTTP routing and multiple logical streams over one tunnel
+  connection, with optional QUIC transport.
+- 🖥️ **Embedded and appliance-style systems** - Deployments that value safe concurrency and
+  predictable native execution; validate target support and capacity on the intended hardware.
+- 🏢 **Enterprise and internal platforms** - Verified TLS, mutual TLS, token authentication, rate
+  limits, Prometheus metrics, and OpenTelemetry tracing.
 
-**Why it matters:** Traditional C/C++ tunnels require constant security patches for memory vulnerabilities. Embedded/IoT devices often can't be easily updated, making Rust's compile-time safety guarantees essential.
+Published FerroTunnel 1.0.0 loopback benchmarks measured 0.078 ms median latency and 47.3 MB
+peak memory at 1,000 concurrent connections. Treat these as reproducible reference points, not
+deployment guarantees, and benchmark the intended hardware and configuration. See
+[docs/benchmark.md](docs/benchmark.md) for the test environment and methodology.
 
 ## CLI Reference
 
@@ -344,7 +363,7 @@ ferrotunnel client [OPTIONS]
 | `--tls` | `FERROTUNNEL_TLS` | false | Enable TLS; requires `--tls-ca` unless `--tls-skip-verify` is explicit |
 | `--tls-ca` | `FERROTUNNEL_TLS_CA` | - | CA certificate for verified TLS |
 | `--quic`* | `FERROTUNNEL_QUIC` | false | Use QUIC transport |
-| `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | false | Enable 0-RTT reconnection |
+| `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | false | Reserved; currently uses a full handshake |
 
 For TCP/TLS clients, `--tls` requires `--tls-ca` unless `--tls-skip-verify` is explicitly set.
 
@@ -421,7 +440,7 @@ Ready-to-run examples are maintained in a separate repository:
 - [Architecture](docs/ARCHITECTURE.md)
 - [Benchmark & Performance](docs/benchmark.md)
 - [Deployment Guide](docs/deployment.md)
-- [Plugin Development](docs/plugin-development.md)
+- [Plugin crate guide](ferrotunnel-plugin/README.md)
 - [Security](docs/security.md)
 
 ## Development

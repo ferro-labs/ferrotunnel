@@ -42,7 +42,7 @@ ferrotunnel server
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress address (optional) |
 | _(env only)_ | `FERROTUNNEL_TOKEN` | (optional) | Authentication token; not accepted as a CLI flag so it cannot leak via the process list |
 | `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read authentication token from a file |
-| `--log-level` | `RUST_LOG` | `info` | Log level |
+| `--log-level` | `RUST_LOG` | `info` | Reserved CLI option; set `RUST_LOG` to configure filtering |
 | `--metrics-bind` | `FERROTUNNEL_METRICS_BIND` | `0.0.0.0:9090` | Prometheus metrics address |
 | `--observability` | `FERROTUNNEL_OBSERVABILITY` | `false` | Enable tracing |
 | `--metrics` | `FERROTUNNEL_METRICS` | `false` | Enable Prometheus metrics endpoint |
@@ -87,7 +87,7 @@ ferrotunnel client --server tunnel.example.com:7835
 | `--dashboard-allow-non-loopback` | `FERROTUNNEL_DASHBOARD_ALLOW_NON_LOOPBACK` | `false` | Allow exposed dashboard bind; requires auth token |
 | `--dashboard-auth-token` | `FERROTUNNEL_DASHBOARD_AUTH_TOKEN` | generated | Dashboard API auth token |
 | `--no-dashboard` | - | `false` | Disable dashboard |
-| `--log-level` | `RUST_LOG` | `info` | Log level |
+| `--log-level` | `RUST_LOG` | `info` | Reserved CLI option; set `RUST_LOG` to configure filtering |
 | `--observability` | `FERROTUNNEL_OBSERVABILITY` | `false` | Enable tracing |
 | `--metrics` | `FERROTUNNEL_METRICS` | `false` | Enable metrics collection |
 | `--tls` | `FERROTUNNEL_TLS` | `false` | Enable TLS; requires `--tls-ca` unless `--tls-skip-verify` is explicit |
@@ -97,7 +97,7 @@ ferrotunnel client --server tunnel.example.com:7835
 | `--tls-cert` | `FERROTUNNEL_TLS_CERT` | - | Client certificate (mTLS) |
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | Client private key (mTLS) |
 | `--quic`* | `FERROTUNNEL_QUIC` | `false` | Use QUIC transport |
-| `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | `false` | Enable 0-RTT reconnection |
+| `--quic-0rtt`* | `FERROTUNNEL_QUIC_0RTT` | `false` | Reserved; currently uses a full handshake |
 
 *\* Requires `--features quic` at build time.*
 

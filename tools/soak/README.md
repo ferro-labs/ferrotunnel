@@ -1,51 +1,45 @@
 # FerroTunnel Soak Testing Tool
 
-Soak testing tool for verifying long-term stability of FerroTunnel.
+The soak tool repeatedly opens authenticated tunnel-client sessions, holds them for five minutes, shuts them down, and records process metrics. It is useful for connection-lifecycle and long-running memory checks.
 
-## Features
-
-- **Continuous Traffic**: Generates sustained connection attempts and data transfer.
-- **Resource Monitoring**: Tracks RSS memory usage to detect leaks.
-- **Concurrency Control**: Configurable number of parallel tunnel simulations.
-- **Metrics Logging**: JSONL output for post-test analysis.
-- **Graceful Shutdown**: Automatically stops after a set duration.
+It does not yet send application data through the tunnel. The `total_bytes` field is a synthetic progress counter, `active_tunnels` is the configured worker count, and RSS measures the soak process itself. Through-tunnel traffic coverage is planned separately.
 
 ## Usage
 
-### 1. Start the Server
-The soak tool is a client that connects to a running FerroTunnel server. You must start the server first:
+### 1. Start the server
 
 ```bash
-cargo run --release --bin ferrotunnel -- server --token my-secret-token --bind 127.0.0.1:7835
+export FERROTUNNEL_TOKEN=my-secret-token
+cargo run --release --bin ferrotunnel -- server --bind 127.0.0.1:7835
 ```
 
-### 2. Run the Soak Test
+### 2. Run the soak tool
 
-In a new terminal:
+In another terminal:
 
 ```bash
-# Run for 1 hour with 50 concurrent connections
 cargo run -p ferrotunnel-soak -- \
     --tunnel-addr 127.0.0.1:7835 \
     --token my-secret-token \
-    --target 127.0.0.1:9999 \
     --concurrency 50 \
     --duration 60
 ```
 
-> **Note:** If you see `Connection refused` errors, it means the tool cannot reach the server at `127.0.0.1:7835`. Ensure the server is running and accessible.
+Any failed session cycle increments the error count and is retried after five seconds. Server
+unavailability is one such failure.
 
-### Arguments
+## Arguments
 
-- `--target <TARGET>`: Address of the target application (default: `127.0.0.1:9999`)
-- `--tunnel-addr <TUNNEL_ADDR>`: Address of the FerroTunnel server (default: `127.0.0.1:7835`)
-- `--token <TOKEN>`: Authentication token (default: `my-secret-token`)
-- `--concurrency <CONCURRENCY>`: Number of simultaneous tunnels (default: `10`)
-- `--duration <DURATION>`: Test duration in minutes (0 = infinite) (default: `0`)
-- `--output <OUTPUT>`: File to write metrics to (default: `soak_metrics.jsonl`)
+- `--tunnel-addr <TUNNEL_ADDR>`: FerroTunnel server address (default: `127.0.0.1:7835`).
+- `--token <TOKEN>`: Client authentication token (default: `my-secret-token`).
+- `--concurrency <CONCURRENCY>`: Number of session workers (default: `10`).
+- `--duration <DURATION>`: Duration in minutes; `0` runs until interrupted (default: `0`).
+- `--output <OUTPUT>`: JSONL metrics path (default: `soak_metrics.jsonl`).
+- `--target <TARGET>`: Reserved for future through-tunnel traffic (default: `127.0.0.1:9999`).
 
-## Analysis
+## Interpreting output
 
-The tool produces a `soak_metrics.jsonl` file. You can analyze this to look for:
-1. **Memory Leaks**: Plot `rss_mb` over time. Linear growth indicates a leak.
-2. **Error Rate**: Check `errors` count. It should remain 0 for a healthy system.
+- `rss_mb`: resident memory of the soak runner. Look for sustained growth after the worker count stabilizes.
+- `errors`: failed session cycles. A healthy local run should remain at zero.
+- `total_bytes`: synthetic progress only; do not use it as a throughput measurement.
+- `active_tunnels`: configured worker count, not a live connection gauge.

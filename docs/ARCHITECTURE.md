@@ -37,7 +37,6 @@ ferrotunnel/
 ├── Cargo.toml
 ├── Makefile
 ├── README.md
-├── ARCHITECTURE.md
 ├── CHANGELOG.md
 ├── ROADMAP.md
 ├── AGENTS.md
@@ -47,16 +46,15 @@ ferrotunnel/
 │   ├── dependabot.yml
 │   └── workflows/
 │       ├── ci.yml
-│       ├── publish.yml
-│       ├── benchmarks.yml
 │       ├── codeql.yml
 │       ├── nightly-fuzz.yml
 │       └── release-assets.yml
 ├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── benchmark.md
 │   ├── deployment.md
-│   ├── plugin-development.md
 │   ├── security.md
-│   └── troubleshooting.md
+│   └── static/
 ├── ferrotunnel/
 │   ├── Cargo.toml
 │   ├── README.md
@@ -182,27 +180,6 @@ ferrotunnel/
 │       ├── concurrent_test.rs
 │       ├── multi_client_test.rs
 │       └── error_test.rs
-├── examples/
-│   ├── Cargo.toml
-│   ├── lib.rs
-│   ├── basic/
-│   │   ├── embedded_server.rs
-│   │   ├── embedded_client.rs
-│   │   └── auto_reconnect.rs
-│   ├── plugins/
-│   │   ├── custom_plugin.rs
-│   │   ├── header_filter.rs
-│   │   ├── ip_blocklist.rs
-│   │   └── plugin_chain.rs
-│   ├── advanced/
-│   │   ├── tls_config.rs
-│   │   └── multi_tunnel.rs
-│   ├── operational/
-│   │   ├── server_observability.rs
-│   │   └── server_graceful_shutdown.rs
-│   └── scenarios/
-│       ├── expose_local_dev.rs
-│       └── receive_webhooks_locally.rs
 ├── benches/
 │   ├── Cargo.toml
 │   ├── lib.rs
@@ -334,13 +311,7 @@ cargo test -p ferrotunnel-tests --test integration
 
 ## Examples
 
-| Category | Examples |
-|----------|----------|
-| basic | `embedded_server`, `embedded_client`, `auto_reconnect` |
-| plugins | `custom_plugin`, `header_filter`, `ip_blocklist`, `plugin_chain` |
-| advanced | `tls_config`, `multi_tunnel` |
-| operational | `server_observability`, `server_graceful_shutdown` |
-| scenarios | `expose_local_dev`, `receive_webhooks_locally` |
+Ready-to-run examples are maintained in the [tunnel-examples repository](https://github.com/ferro-labs/tunnel-examples) so their dependency versions and deployment instructions can evolve independently.
 
 ## Benchmarks
 
