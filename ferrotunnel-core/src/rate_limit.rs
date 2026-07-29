@@ -37,6 +37,9 @@ fn scaled_burst(rate: NonZeroU32, burst_factor: NonZeroU32) -> NonZeroU32 {
     NonZeroU32::new(rate.get().saturating_mul(burst_factor.get())).unwrap_or(NonZeroU32::MAX)
 }
 
+/// Upper bound, in seconds of quota, on a single throttle wait.
+const MAX_THROTTLE_CHUNK_SECS: u32 = 30;
+
 /// Rate limiter for a single session
 #[derive(Clone)]
 pub struct SessionRateLimiter {
@@ -44,6 +47,8 @@ pub struct SessionRateLimiter {
     stream_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>>,
     /// Limits data throughput
     bytes_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>>,
+    bytes_burst: NonZeroU32,
+    bytes_per_sec: NonZeroU32,
 }
 
 impl SessionRateLimiter {
@@ -56,12 +61,14 @@ impl SessionRateLimiter {
         // burst would reject every real data frame.
         let stream_quota = Quota::per_second(config.streams_per_sec)
             .allow_burst(scaled_burst(config.streams_per_sec, config.burst_factor));
-        let bytes_quota = Quota::per_second(config.bytes_per_sec)
-            .allow_burst(scaled_burst(config.bytes_per_sec, config.burst_factor));
+        let bytes_burst = scaled_burst(config.bytes_per_sec, config.burst_factor);
+        let bytes_quota = Quota::per_second(config.bytes_per_sec).allow_burst(bytes_burst);
 
         Self {
             stream_limiter: Arc::new(RateLimiter::direct(stream_quota)),
             bytes_limiter: Arc::new(RateLimiter::direct(bytes_quota)),
+            bytes_burst,
+            bytes_per_sec: config.bytes_per_sec,
         }
     }
 
@@ -104,6 +111,38 @@ impl SessionRateLimiter {
     /// Async version - waits until data can be sent
     pub async fn wait_for_data(&self, _bytes: usize) {
         self.bytes_limiter.until_ready().await;
+    }
+
+    /// Wait until `bytes` of data conform to the byte-rate quota, consuming
+    /// them in bounded chunks so payloads larger than the burst capacity are
+    /// delayed rather than rejected. Invokes `on_progress` after each chunk;
+    /// chunks are capped at `MAX_THROTTLE_CHUNK_SECS` worth of quota, so the
+    /// callback runs at a bounded cadence regardless of configuration.
+    /// Zero-length payloads return immediately.
+    pub async fn throttle_data(&self, bytes: usize, mut on_progress: impl FnMut()) {
+        let mut remaining = bytes;
+        while remaining > 0 {
+            remaining = remaining.saturating_sub(self.throttle_chunk(remaining).await);
+            on_progress();
+        }
+    }
+
+    async fn throttle_chunk(&self, bytes: usize) -> usize {
+        let chunk_cap = self.bytes_burst.get().min(
+            self.bytes_per_sec
+                .get()
+                .saturating_mul(MAX_THROTTLE_CHUNK_SECS),
+        );
+        let capped = u32::try_from(bytes).unwrap_or(u32::MAX).min(chunk_cap);
+        debug_assert!(capped <= self.bytes_burst.get());
+        debug_assert!(capped > 0, "throttle_chunk called with zero-length payload");
+        let Some(n) = NonZeroU32::new(capped) else {
+            return 0;
+        };
+        if self.bytes_limiter.until_n_ready(n).await.is_err() {
+            return capped as usize;
+        }
+        capped as usize
     }
 }
 
@@ -210,5 +249,38 @@ mod tests {
         let limiter = SessionRateLimiter::new(&config);
         // InsufficientCapacity must fail closed.
         assert!(limiter.check_data(100).is_err());
+    }
+
+    #[tokio::test]
+    async fn throttle_data_reports_progress_per_bounded_chunk() {
+        let config = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(100).unwrap(),
+            bytes_per_sec: NonZeroU32::new(1000).unwrap(),
+            burst_factor: NonZeroU32::new(200).unwrap(),
+        };
+        let limiter = SessionRateLimiter::new(&config);
+        let mut calls = 0u32;
+        limiter.throttle_data(120_000, || calls += 1).await;
+        assert_eq!(
+            calls, 4,
+            "a wait must be split into bounded chunks so progress runs between them"
+        );
+    }
+
+    #[tokio::test]
+    async fn throttle_data_delays_payloads_larger_than_burst() {
+        let config = RateLimiterConfig {
+            streams_per_sec: NonZeroU32::new(100).unwrap(),
+            bytes_per_sec: NonZeroU32::new(1000).unwrap(),
+            burst_factor: NonZeroU32::new(1).unwrap(),
+        };
+        let limiter = SessionRateLimiter::new(&config);
+        let started = std::time::Instant::now();
+        limiter.throttle_data(1500, || {}).await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(400),
+            "payload larger than the burst capacity must be throttled, got {:?}",
+            started.elapsed()
+        );
     }
 }

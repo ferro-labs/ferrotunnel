@@ -20,7 +20,7 @@
 //! ```
 
 use crate::config::ServerConfig;
-use ferrotunnel_common::config::{LimitsConfig, TlsConfig};
+use ferrotunnel_common::config::{LimitsConfig, RateLimitConfig, TlsConfig};
 use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_core::resource_limits::ServerResourceLimits;
 use ferrotunnel_core::transport::{tls::TlsTransportConfig, TransportConfig};
@@ -128,6 +128,7 @@ impl Server {
         let tunnel_server = TunnelServer::new(config.bind_addr, config.token)
             .with_transport(transport_config)
             .with_limits(tunnel_limits)
+            .with_rate_limits(config.rate_limits.clone())
             .with_resource_limits(resource_limits);
 
         // Initialize plugins
@@ -380,6 +381,15 @@ impl ServerBuilder {
     #[must_use]
     pub fn limits(mut self, limits: &LimitsConfig) -> Self {
         self.config.limits = limits.clone();
+        self
+    }
+
+    /// Configure per-session rate limits (stream-open and byte rates).
+    ///
+    /// Defaults to [`RateLimitConfig::default`].
+    #[must_use]
+    pub fn rate_limits(mut self, limits: &RateLimitConfig) -> Self {
+        self.config.rate_limits = limits.clone();
         self
     }
 
