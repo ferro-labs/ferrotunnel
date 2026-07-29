@@ -15,18 +15,14 @@ use ferrotunnel_protocol::Frame;
 use kanal::AsyncReceiver;
 use std::io;
 use std::io::IoSlice;
-use std::time::{Duration, Instant};
+#[cfg(feature = "metrics")]
+use std::time::Instant;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::time::timeout;
 use tokio_util::codec::Encoder;
 use tracing::warn;
 
 /// Maximum frames to batch before flushing
 const MAX_BATCH_SIZE: usize = 256;
-
-/// Batch timeout for collecting more frames (microseconds)
-/// Short enough to not hurt latency, long enough to batch effectively
-const BATCH_TIMEOUT_MICROS: u64 = 50;
 
 /// Minimum frames before we consider waiting for more
 /// If we have fewer frames, flush immediately for lower latency
@@ -40,7 +36,7 @@ const MIN_FRAMES_FOR_BATCHING: usize = 2;
 ///
 /// ## P2 Batching Strategy
 /// - Always try to batch frames for throughput
-/// - Short timeout (50µs) balances latency vs throughput
+/// - A single scheduler yield while batching balances latency vs throughput
 /// - Single frame: flush immediately (no wait)
 pub async fn run_batched_sender<W>(
     frame_rx: AsyncReceiver<PrioritizedFrame>,
@@ -71,20 +67,14 @@ pub async fn run_batched_sender<W>(
             }
         }
 
-        // If we got multiple frames, try to collect more with a short timeout
+        // If we got multiple frames, yield once so in-flight producers can enqueue
         // This improves throughput under load while keeping latency low
         if frames.len() >= MIN_FRAMES_FOR_BATCHING && frames.len() < MAX_BATCH_SIZE {
-            let deadline = Duration::from_micros(BATCH_TIMEOUT_MICROS);
-            let start = Instant::now();
-
+            tokio::task::yield_now().await;
             while frames.len() < MAX_BATCH_SIZE {
-                let remaining = deadline.saturating_sub(start.elapsed());
-                if remaining.is_zero() {
-                    break;
-                }
-                match timeout(remaining, frame_rx.recv()).await {
-                    Ok(Ok(pf)) => frames.push(pf),
-                    _ => break,
+                match frame_rx.try_recv() {
+                    Ok(Some(pf)) => frames.push(pf),
+                    Ok(None) | Err(_) => break,
                 }
             }
         }
@@ -236,8 +226,10 @@ mod tests {
     use ferrotunnel_protocol::codec::TunnelCodec;
     use ferrotunnel_protocol::frame::StreamPriority;
     use kanal::bounded_async;
+    use std::time::{Duration, Instant};
     use tokio::io::duplex;
     use tokio::io::AsyncReadExt;
+    use tokio::time::timeout;
 
     fn pf(priority: StreamPriority, frame: Frame) -> PrioritizedFrame {
         (priority, frame)
@@ -352,5 +344,33 @@ mod tests {
         );
 
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn batched_sender_delivers_every_frame() {
+        use futures::StreamExt;
+        use tokio_util::codec::FramedRead;
+
+        const N: u64 = 20_000;
+        let (tx, rx) = bounded_async::<PrioritizedFrame>(64);
+        let (client, server) = duplex(1 << 20);
+
+        tokio::spawn(run_batched_sender(rx, server, TunnelCodec::new()));
+        tokio::spawn(async move {
+            for i in 0..N {
+                tx.send((StreamPriority::Normal, Frame::Heartbeat { timestamp: i }))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let mut framed = FramedRead::new(client, TunnelCodec::new());
+        let mut seen = 0u64;
+        while seen < N {
+            match timeout(Duration::from_secs(5), framed.next()).await {
+                Ok(Some(Ok(_))) => seen += 1,
+                other => panic!("lost {} of {N} frames ({other:?})", N - seen),
+            }
+        }
     }
 }
