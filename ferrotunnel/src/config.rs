@@ -10,7 +10,8 @@
 //! callers.
 
 use ferrotunnel_common::{
-    LimitsConfig, Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR, DEFAULT_TUNNEL_PORT,
+    LimitsConfig, RateLimitConfig, Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR,
+    DEFAULT_TUNNEL_PORT,
 };
 use ferrotunnel_core::validate_limits;
 use std::fmt;
@@ -173,6 +174,9 @@ pub struct ServerConfig {
 
     /// Resource limits for protocol framing and connection handling.
     pub(crate) limits: LimitsConfig,
+
+    /// Per-session rate limits enforced by the tunnel server.
+    pub(crate) rate_limits: RateLimitConfig,
 }
 
 impl ServerConfig {
@@ -230,6 +234,11 @@ impl ServerConfig {
     pub fn limits(&self) -> &LimitsConfig {
         &self.limits
     }
+
+    /// Per-session rate limits enforced by the tunnel server.
+    pub fn rate_limits(&self) -> &RateLimitConfig {
+        &self.rate_limits
+    }
 }
 
 impl fmt::Debug for ServerConfig {
@@ -246,6 +255,7 @@ impl fmt::Debug for ServerConfig {
         debug
             .field("token", &REDACTED)
             .field("limits", &self.limits)
+            .field("rate_limits", &self.rate_limits)
             .finish()
     }
 }
@@ -263,6 +273,7 @@ impl Default for ServerConfig {
             http3_key_path: None,
             token: String::new(),
             limits: LimitsConfig::default(),
+            rate_limits: RateLimitConfig::default(),
         }
     }
 }
