@@ -12,12 +12,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::io::AsyncRead;
-use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
-/// Maximum time to wait when pushing a frame to the batched-sender channel
-/// before treating the peer as unreachable. Bounds every send so a full or
-/// closed channel during teardown cannot block the caller forever (#136).
+/// Maximum time to keep retrying a push to the batched-sender channel before
+/// treating the peer as unreachable. Sends retry `try_send_option` with a
+/// short backoff and fail past this deadline, so a full or closed channel
+/// during teardown cannot stall the caller (#136).
 const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sends frames over TCP by pushing to the channel consumed by the batched sender task.
@@ -38,12 +38,24 @@ impl FrameSender for TcpFrameSender {
         Box::pin(async move {
             // Trait API has no priority; use Normal when sending via trait.
             // Fail fast on a full/closed channel instead of blocking forever (#136).
-            match timeout(FRAME_SEND_TIMEOUT, tx.send((StreamPriority::Normal, frame))).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(ferrotunnel_common::TunnelError::Protocol(e.to_string())),
-                Err(_) => Err(ferrotunnel_common::TunnelError::Protocol(
-                    "timed out sending frame to wire channel".into(),
-                )),
+            let mut item = Some((StreamPriority::Normal, frame));
+            let deadline = tokio::time::Instant::now() + FRAME_SEND_TIMEOUT;
+            let mut backoff = Duration::from_millis(1);
+            loop {
+                match tx.try_send_option(&mut item) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {
+                        let now = tokio::time::Instant::now();
+                        if now >= deadline {
+                            return Err(ferrotunnel_common::TunnelError::Protocol(
+                                "timed out sending frame to wire channel".into(),
+                            ));
+                        }
+                        tokio::time::sleep(backoff.min(deadline.duration_since(now))).await;
+                        backoff = (backoff * 2).min(Duration::from_millis(10));
+                    }
+                    Err(e) => return Err(ferrotunnel_common::TunnelError::Protocol(e.to_string())),
+                }
             }
         })
     }
