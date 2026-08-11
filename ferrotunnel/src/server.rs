@@ -25,13 +25,14 @@ use ferrotunnel_common::{Result, TunnelError};
 use ferrotunnel_core::resource_limits::ServerResourceLimits;
 use ferrotunnel_core::transport::{tls::TlsTransportConfig, TransportConfig};
 use ferrotunnel_core::TunnelServer;
-use ferrotunnel_http::HttpIngress;
 #[cfg(feature = "http3")]
 use ferrotunnel_http::{Http3Ingress, Http3IngressConfig};
+use ferrotunnel_http::{HttpIngress, IngressConfig};
 use ferrotunnel_plugin::PluginRegistry;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{watch, RwLock};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -153,7 +154,16 @@ impl Server {
                 .ok()
         });
 
-        let ingress = HttpIngress::new(config.http_bind_addr, sessions.clone(), registry.clone());
+        let ingress_config = IngressConfig {
+            response_timeout: config.response_timeout,
+            ..Default::default()
+        };
+        let ingress = HttpIngress::with_config(
+            config.http_bind_addr,
+            sessions.clone(),
+            registry.clone(),
+            ingress_config,
+        );
         // Shadow (rather than `mut`) so the binding stays immutable when the
         // `http3` feature is disabled and `alt_svc_header` does not exist.
         #[cfg(feature = "http3")]
@@ -190,7 +200,8 @@ impl Server {
             let http3_config = Http3IngressConfig::with_certs(
                 cert_path.to_string_lossy().to_string(),
                 key_path.to_string_lossy().to_string(),
-            );
+            )
+            .response_timeout(config.response_timeout);
             let http3_ingress =
                 Http3Ingress::new(http3_bind_addr, sessions, registry, http3_config);
             let http3_shutdown_rx = shutdown_rx.clone();
@@ -393,6 +404,18 @@ impl ServerBuilder {
         self
     }
 
+    /// Configure the upstream response timeout for the HTTP and HTTP/3 ingress.
+    ///
+    /// Bounds both time-to-first-response-head and the per-frame stall guard on
+    /// the streamed body, so it must exceed the slowest legitimate upstream.
+    /// Defaults to 60 seconds. A zero duration is rejected by
+    /// [`ServerBuilder::build`].
+    #[must_use]
+    pub fn response_timeout(mut self, timeout: Duration) -> Self {
+        self.config.response_timeout = timeout;
+        self
+    }
+
     /// Configure QUIC transport for the server.
     ///
     /// When enabled, the server will accept QUIC connections for the tunnel control plane.
@@ -491,6 +514,41 @@ mod tests {
         );
         assert_eq!(server.config().token, "my-token");
         assert_eq!(server.config().limits.max_frame_bytes, 4096);
+    }
+
+    #[test]
+    fn test_server_builder_response_timeout_defaults_to_sixty_seconds() {
+        let server = Server::builder()
+            .token("secret")
+            .build()
+            .expect("should build successfully");
+
+        assert_eq!(server.config().response_timeout(), Duration::from_mins(1));
+    }
+
+    #[test]
+    fn test_server_builder_response_timeout_override() {
+        let server = Server::builder()
+            .token("secret")
+            .response_timeout(Duration::from_mins(10))
+            .build()
+            .expect("should build successfully");
+
+        assert_eq!(server.config().response_timeout(), Duration::from_mins(10));
+    }
+
+    #[test]
+    fn test_server_builder_zero_response_timeout_is_rejected() {
+        let result = Server::builder()
+            .token("secret")
+            .response_timeout(Duration::ZERO)
+            .build();
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("response_timeout must be greater than zero"));
     }
 
     #[test]

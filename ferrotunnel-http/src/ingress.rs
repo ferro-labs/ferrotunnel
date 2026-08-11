@@ -32,7 +32,9 @@ pub struct IngressConfig {
     pub max_response_size: usize,
     /// Timeout for upstream handshake (default: 10s)
     pub handshake_timeout: Duration,
-    /// Timeout for upstream response (default: 60s)
+    /// Timeout for upstream response (default: 60s). Governs both
+    /// time-to-first-response-head and the per-frame stall guard on the
+    /// streamed body, so it must exceed the slowest legitimate upstream.
     pub response_timeout: Duration,
     /// Optional Alt-Svc header value to advertise HTTP/3 ingress.
     pub alt_svc_header: Option<HeaderValue>,

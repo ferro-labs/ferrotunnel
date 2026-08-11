@@ -338,6 +338,7 @@ ferrotunnel server [OPTIONS]
 | `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read auth token from a file |
 | `--bind` | `FERROTUNNEL_BIND` | `0.0.0.0:7835` | Control plane |
 | `--http-bind` | `FERROTUNNEL_HTTP_BIND` | `0.0.0.0:8080` | HTTP ingress |
+| `--http-response-timeout` | `FERROTUNNEL_HTTP_RESPONSE_TIMEOUT` | `60` | Upstream response timeout in seconds (HTTP and HTTP/3 ingress); bounds both the response head and stalls between streamed body frames |
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress |
 | `--tls-cert` | `FERROTUNNEL_TLS_CERT` | - | TLS certificate |
 | `--tls-key` | `FERROTUNNEL_TLS_KEY` | - | TLS private key |

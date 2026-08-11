@@ -8,6 +8,7 @@ use ferrotunnel_observability::{
 };
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::{error, info};
 
 #[derive(Args, Debug)]
@@ -27,6 +28,11 @@ pub struct ServerArgs {
     /// HTTP Ingress bind address
     #[arg(long, default_value = "0.0.0.0:8080", env = "FERROTUNNEL_HTTP_BIND")]
     http_bind: SocketAddr,
+
+    /// Upstream response timeout in seconds for the HTTP/HTTP3 ingress;
+    /// raise it above the slowest legitimate upstream response (0 is rejected)
+    #[arg(long, default_value = "60", env = "FERROTUNNEL_HTTP_RESPONSE_TIMEOUT")]
+    http_response_timeout: u64,
 
     /// Metrics bind address
     #[arg(long, default_value = "0.0.0.0:9090", env = "FERROTUNNEL_METRICS_BIND")]
@@ -215,6 +221,8 @@ pub async fn run(args: ServerArgs) -> Result<()> {
 
     let registry = std::sync::Arc::new(registry);
 
+    let response_timeout = Duration::from_secs(args.http_response_timeout);
+
     #[cfg(feature = "http3")]
     let http3_start = if let Some(http3_addr) = args.http3_bind {
         let cert_path = args.http3_cert.clone().or(args.tls_cert.clone());
@@ -230,7 +238,8 @@ pub async fn run(args: ServerArgs) -> Result<()> {
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
             )
-            .client_auth(args.tls_client_auth);
+            .client_auth(args.tls_client_auth)
+            .response_timeout(response_timeout);
             let alt_svc = http3_config.alt_svc_header_value(http3_addr).ok();
             Some((http3_addr, http3_config, alt_svc))
         } else {
@@ -241,9 +250,20 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         None
     };
 
-    info!("Starting HTTP Ingress on {}", args.http_bind);
-    let http_ingress =
-        ferrotunnel_http::HttpIngress::new(args.http_bind, sessions.clone(), registry.clone());
+    info!(
+        "Starting HTTP Ingress on {} (upstream response timeout: {}s)",
+        args.http_bind, args.http_response_timeout
+    );
+    let ingress_config = ferrotunnel_http::IngressConfig {
+        response_timeout,
+        ..Default::default()
+    };
+    let http_ingress = ferrotunnel_http::HttpIngress::with_config(
+        args.http_bind,
+        sessions.clone(),
+        registry.clone(),
+        ingress_config,
+    );
     #[cfg(feature = "http3")]
     let http_ingress = if let Some((_, _, Some(alt_svc))) = &http3_start {
         http_ingress.with_alt_svc_header(alt_svc.clone())
@@ -363,6 +383,12 @@ fn validate_args(args: &ServerArgs) -> Result<()> {
         ));
     }
 
+    if args.http_response_timeout == 0 {
+        return Err(anyhow!(
+            "--http-response-timeout (FERROTUNNEL_HTTP_RESPONSE_TIMEOUT) must be greater than 0"
+        ));
+    }
+
     Ok(())
 }
 
@@ -377,6 +403,7 @@ mod tests {
             token_file: None,
             log_level: "info".to_string(),
             http_bind: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            http_response_timeout: 60,
             metrics_bind: SocketAddr::from(([127, 0, 0, 1], 9090)),
             tls_cert: None,
             tls_key: None,
@@ -441,5 +468,35 @@ mod tests {
         };
 
         assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn zero_http_response_timeout_is_rejected() {
+        let args = ServerArgs {
+            http_response_timeout: 0,
+            ..server_args()
+        };
+
+        let error = validate_args(&args).err().map(|err| err.to_string());
+
+        assert_eq!(
+            error.as_deref(),
+            Some("--http-response-timeout (FERROTUNNEL_HTTP_RESPONSE_TIMEOUT) must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn default_http_response_timeout_comes_from_the_parser() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: ServerArgs,
+        }
+
+        let cli = Cli::parse_from(["server"]);
+        assert_eq!(cli.args.http_response_timeout, 60);
+        assert!(validate_args(&cli.args).is_ok());
     }
 }

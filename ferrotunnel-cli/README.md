@@ -39,6 +39,7 @@ ferrotunnel server
 |--------|--------------|---------|-------------|
 | `--bind` | `FERROTUNNEL_BIND` | `0.0.0.0:7835` | Tunnel control plane address |
 | `--http-bind` | `FERROTUNNEL_HTTP_BIND` | `0.0.0.0:8080` | HTTP ingress address |
+| `--http-response-timeout` | `FERROTUNNEL_HTTP_RESPONSE_TIMEOUT` | `60` | Upstream response timeout in seconds (HTTP and HTTP/3 ingress); bounds both the response head and stalls between streamed body frames, so size it above the slowest legitimate upstream |
 | `--tcp-bind` | `FERROTUNNEL_TCP_BIND` | - | TCP ingress address (optional) |
 | _(env only)_ | `FERROTUNNEL_TOKEN` | (optional) | Authentication token; not accepted as a CLI flag so it cannot leak via the process list |
 | `--token-file` | `FERROTUNNEL_TOKEN_FILE` | - | Read authentication token from a file |
