@@ -397,7 +397,8 @@ impl ServerBuilder {
 
     /// Configure per-session rate limits (stream-open and byte rates).
     ///
-    /// Defaults to [`RateLimitConfig::default`].
+    /// Defaults to [`RateLimitConfig::default`]. All rate-limit values must be
+    /// greater than zero.
     #[must_use]
     pub fn rate_limits(mut self, limits: &RateLimitConfig) -> Self {
         self.config.rate_limits = limits.clone();
@@ -436,8 +437,9 @@ impl ServerBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if required configuration is missing:
+    /// Returns an error if required configuration is missing or invalid:
     /// - `token` must be set
+    /// - all rate-limit values must be greater than zero
     pub fn build(self) -> Result<Server> {
         self.config.validate()?;
         if let Some(error) = self.tls_validation_error {
@@ -558,6 +560,45 @@ mod tests {
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("token"));
+    }
+
+    #[test]
+    fn test_server_builder_rejects_zero_rate_limits() {
+        let cases = [
+            (
+                "streams_per_sec",
+                RateLimitConfig {
+                    streams_per_sec: 0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "bytes_per_sec",
+                RateLimitConfig {
+                    bytes_per_sec: 0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "burst_factor",
+                RateLimitConfig {
+                    burst_factor: 0,
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (field, rate_limits) in cases {
+            let err = Server::builder()
+                .token("secret")
+                .rate_limits(&rate_limits)
+                .build()
+                .expect_err("zero rate-limit values must be rejected");
+            assert!(
+                err.to_string().contains(field),
+                "error should identify {field}: {err}"
+            );
+        }
     }
 
     #[test]
