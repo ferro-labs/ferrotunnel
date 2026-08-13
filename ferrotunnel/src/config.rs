@@ -177,6 +177,9 @@ pub struct ServerConfig {
 
     /// Per-session rate limits enforced by the tunnel server.
     pub(crate) rate_limits: RateLimitConfig,
+
+    /// Upstream response timeout for the HTTP and HTTP/3 ingress.
+    pub(crate) response_timeout: Duration,
 }
 
 impl ServerConfig {
@@ -186,6 +189,11 @@ impl ServerConfig {
             return Err(TunnelError::Config("token is required".into()));
         }
         validate_limits(&self.limits)?;
+        if self.response_timeout.is_zero() {
+            return Err(TunnelError::Config(
+                "response_timeout must be greater than zero".into(),
+            ));
+        }
         #[cfg(feature = "http3")]
         if self.http3_bind_addr.is_some()
             && (self.http3_cert_path.is_none() || self.http3_key_path.is_none())
@@ -239,6 +247,11 @@ impl ServerConfig {
     pub fn rate_limits(&self) -> &RateLimitConfig {
         &self.rate_limits
     }
+
+    /// Upstream response timeout for the HTTP and HTTP/3 ingress.
+    pub fn response_timeout(&self) -> Duration {
+        self.response_timeout
+    }
 }
 
 impl fmt::Debug for ServerConfig {
@@ -256,6 +269,7 @@ impl fmt::Debug for ServerConfig {
             .field("token", &REDACTED)
             .field("limits", &self.limits)
             .field("rate_limits", &self.rate_limits)
+            .field("response_timeout", &self.response_timeout)
             .finish()
     }
 }
@@ -274,6 +288,7 @@ impl Default for ServerConfig {
             token: String::new(),
             limits: LimitsConfig::default(),
             rate_limits: RateLimitConfig::default(),
+            response_timeout: Duration::from_mins(1),
         }
     }
 }

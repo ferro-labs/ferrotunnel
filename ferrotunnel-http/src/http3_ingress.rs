@@ -92,6 +92,12 @@ impl Http3IngressConfig {
         self
     }
 
+    #[must_use]
+    pub fn response_timeout(mut self, timeout: Duration) -> Self {
+        self.response_timeout = timeout;
+        self
+    }
+
     /// Builds an `Alt-Svc` header advertising both `h3` and `h3-29` (Section 12.6).
     pub fn alt_svc_header_value(
         &self,
