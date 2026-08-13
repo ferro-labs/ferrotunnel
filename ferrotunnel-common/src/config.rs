@@ -63,18 +63,21 @@ impl Default for LimitsConfig {
     }
 }
 
-/// Rate limiting configuration
+/// Rate limiting configuration.
+///
+/// `ferrotunnel::ServerBuilder::build` rejects zero values for these fields,
+/// while lower-level entry points clamp a zero to `1` rather than failing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
-    /// Maximum new streams per second per session. Must be greater than zero.
+    /// Maximum new streams per second per session.
     pub streams_per_sec: u32,
-    /// Maximum bytes per second per session. Must be greater than zero.
+    /// Maximum bytes per second per session.
     pub bytes_per_sec: u64,
     /// Burst allowance multiplier applied to the per-second rates.
     ///
-    /// Must be greater than zero. The effective burst capacity is
-    /// `rate * burst_factor`, saturating at `u32::MAX`. Values beyond a small
-    /// single-digit multiple offer no practical benefit.
+    /// The effective burst capacity is `rate * burst_factor`, saturating at
+    /// `u32::MAX`. Values beyond a small single-digit multiple offer no
+    /// practical benefit.
     pub burst_factor: u32,
 }
 

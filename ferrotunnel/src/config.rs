@@ -194,6 +194,21 @@ impl ServerConfig {
                 "response_timeout must be greater than zero".into(),
             ));
         }
+        if self.rate_limits.streams_per_sec == 0 {
+            return Err(TunnelError::Config(
+                "rate_limits.streams_per_sec must be greater than zero".into(),
+            ));
+        }
+        if self.rate_limits.bytes_per_sec == 0 {
+            return Err(TunnelError::Config(
+                "rate_limits.bytes_per_sec must be greater than zero".into(),
+            ));
+        }
+        if self.rate_limits.burst_factor == 0 {
+            return Err(TunnelError::Config(
+                "rate_limits.burst_factor must be greater than zero".into(),
+            ));
+        }
         #[cfg(feature = "http3")]
         if self.http3_bind_addr.is_some()
             && (self.http3_cert_path.is_none() || self.http3_key_path.is_none())

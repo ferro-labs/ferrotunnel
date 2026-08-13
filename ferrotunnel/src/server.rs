@@ -440,6 +440,7 @@ impl ServerBuilder {
     /// Returns an error if required configuration is missing or invalid:
     /// - `token` must be set
     /// - all rate-limit values must be greater than zero
+    /// - `response_timeout` must be greater than zero
     pub fn build(self) -> Result<Server> {
         self.config.validate()?;
         if let Some(error) = self.tls_validation_error {
