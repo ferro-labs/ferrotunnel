@@ -164,11 +164,74 @@ fn bench_multiplexer_stream_creation(c: &mut Criterion) {
     });
 }
 
+/// Upper bound on a single round-trip. A correctly wired loopback completes in
+/// microseconds, so tripping this means the data path stalled: fail the bench
+/// instead of hanging the whole run.
+const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Benchmark complete round-trip through multiplexer
+///
+/// A multiplexer cannot talk to itself: `open_stream` emits its `OpenStream`
+/// frame through `frame_tx`, while inbound streams only appear once someone
+/// feeds that frame to `process_frame`. This wires a client and a server
+/// multiplexer together with a pump in each direction, which is the smallest
+/// arrangement that actually exercises the data path.
 fn bench_multiplexer_round_trip(c: &mut Criterion) {
-    use ferrotunnel_core::stream::{Multiplexer, PrioritizedFrame};
+    use ferrotunnel_core::stream::{Multiplexer, PrioritizedFrame, VirtualStream};
     use ferrotunnel_protocol::frame::Protocol;
+    use std::sync::Arc;
+    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Move frames from one multiplexer's outbound channel into its peer.
+    fn pump(
+        rx: kanal::AsyncReceiver<PrioritizedFrame>,
+        peer: Arc<Multiplexer>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Ok((_priority, frame)) = rx.recv().await {
+                if peer.process_frame(frame).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// Build a connected client/server pair with the server echoing every
+    /// stream, and open one client stream over it.
+    async fn connect(capacity: usize) -> (VirtualStream, Vec<tokio::task::JoinHandle<()>>) {
+        let (client_tx, client_rx) = bounded_async::<PrioritizedFrame>(capacity);
+        let (server_tx, server_rx) = bounded_async::<PrioritizedFrame>(capacity);
+
+        let (client_mux, _client_accept) = Multiplexer::new(client_tx, true);
+        let (server_mux, server_accept) = Multiplexer::new(server_tx, false);
+        let client_mux = Arc::new(client_mux);
+        let server_mux = Arc::new(server_mux);
+
+        let mut tasks = vec![
+            pump(client_rx, Arc::clone(&server_mux)),
+            pump(server_rx, Arc::clone(&client_mux)),
+        ];
+
+        // The client opens exactly one stream, so echo inline rather than
+        // spawning per accepted stream. A detached echo task would outlive the
+        // abort below: once the pumps stop, its read parks forever instead of
+        // seeing EOF, leaking a task and its buffer for every sample.
+        tasks.push(tokio::spawn(async move {
+            while let Ok(mut stream) = server_accept.recv().await {
+                let mut buf = vec![0u8; 65536];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    stream.write_all(&buf[..n]).await.unwrap();
+                }
+            }
+        }));
+
+        let stream = client_mux.open_stream(Protocol::TCP).await.unwrap();
+        (stream, tasks)
+    }
 
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("multiplexer_round_trip");
@@ -176,32 +239,40 @@ fn bench_multiplexer_round_trip(c: &mut Criterion) {
     for size in [1024, 4096, 16384] {
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.to_async(&rt).iter(|| async {
-                let (frame_tx, _frame_rx) = bounded_async::<PrioritizedFrame>(100);
-                let (mux, stream_rx) = Multiplexer::new(frame_tx, true);
-
-                // Simulate server-side accepting stream
-                tokio::spawn(async move {
-                    while let Ok(mut stream) = stream_rx.recv().await {
-                        tokio::spawn(async move {
-                            let mut buf = vec![0u8; 65536];
-                            while let Ok(n) = stream.read(&mut buf).await {
-                                if n == 0 {
-                                    break;
-                                }
-                                stream.write_all(&buf[..n]).await.unwrap();
-                            }
-                        });
-                    }
-                });
-
-                // Client: open stream, send data, read response
-                let mut stream = mux.open_stream(Protocol::TCP).await.unwrap();
+            // `iter_custom` keeps connection setup out of the measured region:
+            // stream creation is already covered by `multiplexer_stream_creation`,
+            // so this group times only the write/echo/read path.
+            b.to_async(&rt).iter_custom(|iters| async move {
+                let (mut stream, tasks) = connect(1024).await;
                 let data = vec![0u8; size];
-                stream.write_all(&data).await.unwrap();
-
                 let mut response = vec![0u8; size];
-                stream.read_exact(&mut response).await.unwrap();
+
+                let start = Instant::now();
+                for _ in 0..iters {
+                    // Both halves are guarded: `write_all` pushes into a bounded
+                    // frame channel, so a stalled pump would park it before the
+                    // read is ever reached.
+                    let round_trip = async {
+                        stream.write_all(&data).await?;
+                        stream.read_exact(&mut response).await?;
+                        Ok::<(), std::io::Error>(())
+                    };
+                    let Ok(result) = tokio::time::timeout(ROUND_TRIP_TIMEOUT, round_trip).await
+                    else {
+                        panic!(
+                            "round trip stalled after {ROUND_TRIP_TIMEOUT:?}: \
+                             the loopback is no longer delivering frames"
+                        )
+                    };
+                    result.unwrap();
+                }
+                let elapsed = start.elapsed();
+
+                drop(stream);
+                for task in tasks {
+                    task.abort();
+                }
+                elapsed
             });
         });
     }

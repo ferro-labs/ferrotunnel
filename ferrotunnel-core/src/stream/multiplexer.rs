@@ -68,6 +68,7 @@ pub struct Multiplexer {
     frame_tx: AsyncSender<PrioritizedFrame>,
     new_stream_tx: AsyncSender<VirtualStream>,
     buffer_pool: ReadBufferPool,
+    rate_limiter: Option<crate::rate_limit::SessionRateLimiter>,
 }
 
 /// Send a prioritized frame to the wire channel with a bounded deadline.
@@ -118,9 +119,26 @@ impl Multiplexer {
                 frame_tx,
                 new_stream_tx,
                 buffer_pool: ReadBufferPool::with_default_capacity(),
+                rate_limiter: None,
             },
             new_stream_rx,
         )
+    }
+
+    /// Apply `limiter` to the stream-open rate for streams opened through
+    /// [`AnyMultiplexer`](crate::stream::AnyMultiplexer).
+    ///
+    /// Only stream opens are metered here. Byte rates on this transport are
+    /// already applied by `TunnelServer::process_messages` as frames arrive.
+    #[must_use]
+    pub fn with_rate_limiter(mut self, limiter: crate::rate_limit::SessionRateLimiter) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// The session rate limiter applied to streams from this multiplexer, if any.
+    pub fn rate_limiter(&self) -> Option<&crate::rate_limit::SessionRateLimiter> {
+        self.rate_limiter.as_ref()
     }
 
     /// Priority for a frame when sending (used by batched sender order).

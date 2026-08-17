@@ -155,7 +155,7 @@ impl Server {
         });
 
         let ingress_config = IngressConfig {
-            response_timeout: config.response_timeout,
+            response_timeout: config.http_response_timeout,
             ..Default::default()
         };
         let ingress = HttpIngress::with_config(
@@ -201,7 +201,7 @@ impl Server {
                 cert_path.to_string_lossy().to_string(),
                 key_path.to_string_lossy().to_string(),
             )
-            .response_timeout(config.response_timeout);
+            .response_timeout(config.http_response_timeout);
             let http3_ingress =
                 Http3Ingress::new(http3_bind_addr, sessions, registry, http3_config);
             let http3_shutdown_rx = shutdown_rx.clone();
@@ -397,8 +397,9 @@ impl ServerBuilder {
 
     /// Configure per-session rate limits (stream-open and byte rates).
     ///
-    /// Defaults to [`RateLimitConfig::default`]. All rate-limit values must be
-    /// greater than zero.
+    /// Defaults to [`RateLimitConfig::default`]. Every value must be non-zero,
+    /// and `bytes_per_sec` must fit in a `u32`, which is what the limiter
+    /// counts in.
     #[must_use]
     pub fn rate_limits(mut self, limits: &RateLimitConfig) -> Self {
         self.config.rate_limits = limits.clone();
@@ -412,8 +413,8 @@ impl ServerBuilder {
     /// Defaults to 60 seconds. A zero duration is rejected by
     /// [`ServerBuilder::build`].
     #[must_use]
-    pub fn response_timeout(mut self, timeout: Duration) -> Self {
-        self.config.response_timeout = timeout;
+    pub fn http_response_timeout(mut self, timeout: Duration) -> Self {
+        self.config.http_response_timeout = timeout;
         self
     }
 
@@ -439,8 +440,9 @@ impl ServerBuilder {
     ///
     /// Returns an error if required configuration is missing or invalid:
     /// - `token` must be set
-    /// - all rate-limit values must be greater than zero
-    /// - `response_timeout` must be greater than zero
+    /// - every rate-limit value must be non-zero, with `bytes_per_sec` no
+    ///   greater than `u32::MAX`
+    /// - `http_response_timeout` must be greater than zero
     pub fn build(self) -> Result<Server> {
         self.config.validate()?;
         if let Some(error) = self.tls_validation_error {
@@ -520,38 +522,44 @@ mod tests {
     }
 
     #[test]
-    fn test_server_builder_response_timeout_defaults_to_sixty_seconds() {
+    fn test_server_builder_http_response_timeout_defaults_to_sixty_seconds() {
         let server = Server::builder()
             .token("secret")
             .build()
             .expect("should build successfully");
 
-        assert_eq!(server.config().response_timeout(), Duration::from_mins(1));
+        assert_eq!(
+            server.config().http_response_timeout(),
+            Duration::from_mins(1)
+        );
     }
 
     #[test]
-    fn test_server_builder_response_timeout_override() {
+    fn test_server_builder_http_response_timeout_override() {
         let server = Server::builder()
             .token("secret")
-            .response_timeout(Duration::from_mins(10))
+            .http_response_timeout(Duration::from_mins(10))
             .build()
             .expect("should build successfully");
 
-        assert_eq!(server.config().response_timeout(), Duration::from_mins(10));
+        assert_eq!(
+            server.config().http_response_timeout(),
+            Duration::from_mins(10)
+        );
     }
 
     #[test]
-    fn test_server_builder_zero_response_timeout_is_rejected() {
+    fn test_server_builder_zero_http_response_timeout_is_rejected() {
         let result = Server::builder()
             .token("secret")
-            .response_timeout(Duration::ZERO)
+            .http_response_timeout(Duration::ZERO)
             .build();
 
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("response_timeout must be greater than zero"));
+            .contains("http_response_timeout must be greater than zero"));
     }
 
     #[test]
@@ -564,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_server_builder_rejects_zero_rate_limits() {
+    fn test_server_builder_rejects_invalid_rate_limits() {
         let cases = [
             (
                 "streams_per_sec",
@@ -587,6 +595,13 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            (
+                "bytes_per_sec",
+                RateLimitConfig {
+                    bytes_per_sec: u64::from(u32::MAX) + 1,
+                    ..Default::default()
+                },
+            ),
         ];
 
         for (field, rate_limits) in cases {
@@ -594,7 +609,7 @@ mod tests {
                 .token("secret")
                 .rate_limits(&rate_limits)
                 .build()
-                .expect_err("zero rate-limit values must be rejected");
+                .expect_err("rate-limit values outside the representable range must be rejected");
             assert!(
                 err.to_string().contains(field),
                 "error should identify {field}: {err}"

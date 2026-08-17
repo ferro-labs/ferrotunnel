@@ -65,8 +65,11 @@ impl Default for LimitsConfig {
 
 /// Rate limiting configuration.
 ///
-/// `ferrotunnel::ServerBuilder::build` rejects zero values for these fields,
-/// while lower-level entry points clamp a zero to `1` rather than failing.
+/// The limiter counts in `u32` cells, so every field must be non-zero and
+/// `bytes_per_sec` must fit in a `u32`. Both `ferrotunnel::ServerBuilder::build`
+/// and `ferrotunnel_core::TunnelServer::run` reject values outside that range,
+/// so a rate the limiter cannot represent fails at startup instead of being
+/// silently clamped to a more restrictive one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
     /// Maximum new streams per second per session.

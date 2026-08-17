@@ -205,6 +205,7 @@ impl TunnelServer {
 
     pub async fn run(mut self) -> Result<()> {
         crate::limits::validate_limits(&self.limits_config)?;
+        crate::limits::validate_rate_limits(&self.rate_limits)?;
         let listener = TcpListener::bind(self.addr).await?;
         info!("Server listening on {}", self.addr);
 
@@ -341,15 +342,22 @@ impl TunnelServer {
                     }
                 });
 
+                // The limiter is shared with the multiplexer so the ingress's own
+                // stream opens are metered too: `process_messages` only sees
+                // `OpenStream` frames sent by the client, never the ones the
+                // ingress opens on its behalf.
+                let rate_limiter = SessionRateLimiter::new(&rate_limits.into());
                 let session = Session::new(
                     session_id,
                     tunnel_id.clone(),
                     addr,
                     token,
                     capabilities,
-                    Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+                    Some(AnyMultiplexer::Tcp(
+                        multiplexer.clone().with_rate_limiter(rate_limiter.clone()),
+                    )),
                 )
-                .with_rate_limiter(SessionRateLimiter::new(&rate_limits.into()));
+                .with_rate_limiter(rate_limiter);
 
                 if let Err(e) = sessions.add(session) {
                     warn!("Failed to register session: {}", e);
@@ -505,6 +513,7 @@ impl TunnelServer {
     /// on different ports.
     pub async fn run_quic(mut self, quic_addr: SocketAddr) -> Result<()> {
         crate::limits::validate_limits(&self.limits_config)?;
+        crate::limits::validate_rate_limits(&self.rate_limits)?;
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
@@ -663,8 +672,15 @@ impl TunnelServer {
                     capabilities,
                 } = auth;
 
-                // Create QUIC multiplexer for data streams
-                let quic_mux = QuicMultiplexer::new(connection.clone(), false);
+                // Create QUIC multiplexer for data streams.
+                //
+                // The limiter is shared with the multiplexer, not just stored on
+                // the session: QUIC data never reaches `process_messages`, so
+                // `AnyMultiplexer::open_stream` is the only place the budget can
+                // be applied to this transport.
+                let rate_limiter = SessionRateLimiter::new(&rate_limits.into());
+                let quic_mux = QuicMultiplexer::new(connection.clone(), false)
+                    .with_rate_limiter(rate_limiter.clone());
 
                 let session = Session::new(
                     session_id,
@@ -674,7 +690,7 @@ impl TunnelServer {
                     capabilities,
                     Some(AnyMultiplexer::Quic(quic_mux.clone())),
                 )
-                .with_rate_limiter(SessionRateLimiter::new(&rate_limits.into()));
+                .with_rate_limiter(rate_limiter);
 
                 if let Err(e) = sessions.add(session) {
                     warn!("Failed to register QUIC session: {}", e);
@@ -914,6 +930,27 @@ mod tests {
             TunnelError::Timeout(msg) if msg.contains("server handshake timed out")
         ));
         assert_eq!(limits.available_sessions(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_rejects_unrepresentable_rate_limits_before_binding() {
+        // Port 0 would bind successfully, so reaching an error at all proves
+        // validation runs ahead of the listener rather than after it.
+        let server = TunnelServer::new("127.0.0.1:0".parse().unwrap(), "token".to_string())
+            .with_rate_limits(RateLimitConfig {
+                bytes_per_sec: u64::from(u32::MAX) + 1,
+                ..Default::default()
+            });
+
+        let err = server
+            .run()
+            .await
+            .expect_err("a byte rate the limiter cannot represent must be rejected");
+
+        assert!(
+            matches!(err, TunnelError::Config(ref msg) if msg.contains("bytes_per_sec")),
+            "error should identify the field: {err}"
+        );
     }
 
     #[tokio::test]

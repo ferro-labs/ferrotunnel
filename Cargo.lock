@@ -727,7 +727,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferrotunnel"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "anyhow",
  "ferrotunnel-common",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-benches"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "bincode-next",
  "bytes",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-cli"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-common"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "anyhow",
  "bincode-next",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-core"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "bytes",
  "criterion",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-http"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "bytes",
  "ferrotunnel-common",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-loadgen"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-observability"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-plugin"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "async-trait",
  "governor",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-protocol"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "bincode-next",
  "bytes",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-soak"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotunnel-tests"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "bytes",
  "ferrotunnel",

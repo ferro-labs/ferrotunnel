@@ -13,7 +13,7 @@ use ferrotunnel_common::{
     LimitsConfig, RateLimitConfig, Result, TunnelError, DEFAULT_HTTP_PORT, DEFAULT_LOCAL_ADDR,
     DEFAULT_TUNNEL_PORT,
 };
-use ferrotunnel_core::validate_limits;
+use ferrotunnel_core::{validate_limits, validate_rate_limits};
 use std::fmt;
 use std::net::SocketAddr;
 #[cfg(feature = "http3")]
@@ -179,7 +179,7 @@ pub struct ServerConfig {
     pub(crate) rate_limits: RateLimitConfig,
 
     /// Upstream response timeout for the HTTP and HTTP/3 ingress.
-    pub(crate) response_timeout: Duration,
+    pub(crate) http_response_timeout: Duration,
 }
 
 impl ServerConfig {
@@ -189,26 +189,12 @@ impl ServerConfig {
             return Err(TunnelError::Config("token is required".into()));
         }
         validate_limits(&self.limits)?;
-        if self.response_timeout.is_zero() {
+        if self.http_response_timeout.is_zero() {
             return Err(TunnelError::Config(
-                "response_timeout must be greater than zero".into(),
+                "http_response_timeout must be greater than zero".into(),
             ));
         }
-        if self.rate_limits.streams_per_sec == 0 {
-            return Err(TunnelError::Config(
-                "rate_limits.streams_per_sec must be greater than zero".into(),
-            ));
-        }
-        if self.rate_limits.bytes_per_sec == 0 {
-            return Err(TunnelError::Config(
-                "rate_limits.bytes_per_sec must be greater than zero".into(),
-            ));
-        }
-        if self.rate_limits.burst_factor == 0 {
-            return Err(TunnelError::Config(
-                "rate_limits.burst_factor must be greater than zero".into(),
-            ));
-        }
+        validate_rate_limits(&self.rate_limits)?;
         #[cfg(feature = "http3")]
         if self.http3_bind_addr.is_some()
             && (self.http3_cert_path.is_none() || self.http3_key_path.is_none())
@@ -264,8 +250,8 @@ impl ServerConfig {
     }
 
     /// Upstream response timeout for the HTTP and HTTP/3 ingress.
-    pub fn response_timeout(&self) -> Duration {
-        self.response_timeout
+    pub fn http_response_timeout(&self) -> Duration {
+        self.http_response_timeout
     }
 }
 
@@ -284,7 +270,7 @@ impl fmt::Debug for ServerConfig {
             .field("token", &REDACTED)
             .field("limits", &self.limits)
             .field("rate_limits", &self.rate_limits)
-            .field("response_timeout", &self.response_timeout)
+            .field("http_response_timeout", &self.http_response_timeout)
             .finish()
     }
 }
@@ -303,7 +289,7 @@ impl Default for ServerConfig {
             token: String::new(),
             limits: LimitsConfig::default(),
             rate_limits: RateLimitConfig::default(),
-            response_timeout: Duration::from_mins(1),
+            http_response_timeout: Duration::from_mins(1),
         }
     }
 }
