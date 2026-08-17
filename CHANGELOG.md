@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-08-17
+
+Reliability release covering per-session rate limiting, frame delivery under
+cancellation, and ingress timeout configuration.
+
+### Added
+
+- Expose the ingress upstream response timeout as `--http-response-timeout`
+  (`FERROTUNNEL_HTTP_RESPONSE_TIMEOUT`), so deployments of the shipped binary can
+  serve upstreams that legitimately take longer than the 60s default. The timeout
+  bounds both the response head and stalls between streamed body frames
+  ([#172](https://github.com/ferro-labs/ferrotunnel/issues/172)).
+- Configure the same timeout from the library through
+  `ServerBuilder::http_response_timeout`, and from `Http3IngressConfig` through a
+  matching builder method. Both ingress construction paths now read it, where they
+  previously used a hardcoded 60s
+  ([#172](https://github.com/ferro-labs/ferrotunnel/issues/172)).
+- Apply per-session rate limits configured through `Server::builder()`. The
+  `rate_limits` setting was previously accepted and never reached the tunnel
+  server ([#167](https://github.com/ferro-labs/ferrotunnel/issues/167)).
+
+### Fixed
+
+- Throttle over-budget sessions instead of dropping their data. Frames exceeding
+  the byte-rate quota are now delayed and delivered, waiting for quota in bounded
+  chunks with the session heartbeat refreshed between them, so a slow session is
+  never evicted as stale
+  ([#167](https://github.com/ferro-labs/ferrotunnel/issues/167)).
+- Stop losing frames when a send or receive is cancelled by a timeout, which
+  could corrupt a stream mid-transfer
+  ([#168](https://github.com/ferro-labs/ferrotunnel/issues/168)).
+- Reject zero-valued rate limits at `build()` instead of silently treating them
+  as `1`, the most restrictive setting available, for a value that reads as
+  disabled ([#171](https://github.com/ferro-labs/ferrotunnel/issues/171)).
+- Reject a `bytes_per_sec` above `u32::MAX` rather than clamping it to roughly
+  4.29 GB/s. The limiter counts in `u32` cells, so an out-of-range rate now fails
+  at startup instead of throttling sessions below the configured value. Both
+  `ServerBuilder::build` and `TunnelServer::run` validate, closing the path that
+  bypassed validation entirely
+  ([#176](https://github.com/ferro-labs/ferrotunnel/issues/176)).
+- Complete the `multiplexer_round_trip` benchmark group, which could not finish
+  and left `cargo bench --bench full_stack` hanging
+  ([#174](https://github.com/ferro-labs/ferrotunnel/issues/174)).
+
+### Changed
+
+- Name the library setting `ServerBuilder::http_response_timeout` to match the
+  `--http-response-timeout` flag and reflect that it applies to the HTTP and
+  HTTP/3 ingress rather than the tunnel control plane
+  ([#177](https://github.com/ferro-labs/ferrotunnel/issues/177)).
+- Update workspace and internal dependency versions to 1.5.2.
+
 ## [1.5.1] - 2026-07-10
 
 Maintenance release restoring reproducible dependency and release gates and aligning public documentation with the 1.5.x runtime.
@@ -407,7 +459,8 @@ FerroTunnel v1.0.0 is the first stable release.
 | `ferrotunnel-observability` | Metrics, tracing, and dashboard |
 | `ferrotunnel-common` | Shared types and errors |
 
-[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/ferro-labs/ferrotunnel/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/ferro-labs/ferrotunnel/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/ferro-labs/ferrotunnel/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ferro-labs/ferrotunnel/compare/v1.3.0...v1.4.0

@@ -16,16 +16,17 @@ This roadmap records shipped capability and the intended order of future release
 | v1.0.7 | Optional QUIC tunnel transport with native stream multiplexing and TLS 1.3. The 0-RTT option is reserved and currently uses a full handshake. |
 | v1.0.8 | Optional browser-facing HTTP/3 ingress with Alt-Svc discovery. |
 | v1.1.0-v1.5.0 | Security, resource, lifecycle, concurrency, protocol, configuration, and public-API hardening. |
+| v1.5.1 | Reproducible dependency and release gates, and public documentation alignment. |
 
 ## Current release
 
-### v1.5.1 - Maintenance
+### v1.5.2 - Reliability
 
-- Update vulnerable and unsound dependency versions recorded in the lockfile.
-- Run both RustSec and cargo-deny checks in the required CI gate.
-- Reconcile the remaining audit checklist and move behavior changes to their owning future release.
-- Correct security, plugin, soak, QUIC 0-RTT, release, and workflow documentation.
-- Validate all published crate packages and release metadata.
+- Deliver over-budget session data by throttling it rather than dropping it.
+- Close the frame-loss window when a channel send or receive is cancelled by a timeout.
+- Apply per-session rate limits configured through the server builder.
+- Reject rate-limit values the limiter cannot represent instead of clamping them.
+- Make the ingress upstream response timeout configurable from the CLI and the library.
 
 Exit gate: `make check`, `cargo test --workspace --all-features`, documentation with warnings denied, `make audit`, and `make publish-dry-run`.
 
