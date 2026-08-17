@@ -22,13 +22,22 @@ type ThrottleFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// which is what `process_messages` meters on the TCP path, so metering writes
 /// as well would make the same setting mean different things per transport.
 ///
-/// Over-budget data is delayed rather than dropped, matching the TCP path: the
-/// bytes already read are delivered, and the *next* read waits for quota. Not
-/// reading propagates backpressure through QUIC flow control to the peer.
+/// Over-budget data is delayed rather than dropped: bytes are read into an
+/// internal buffer and withheld until the session has paid for them, so quota
+/// is always reserved *before* the caller can see them. Withholding is what
+/// makes the cap hold for short-lived streams — the ingress opens a fresh
+/// stream per request, so a wrapper that released bytes first and settled up
+/// on the next read would let every request through unmetered and be dropped
+/// before the debt came due. Not reading propagates backpressure through QUIC
+/// flow control to the peer.
 pub struct RateLimitedStream<S> {
     inner: S,
     limiter: SessionRateLimiter,
     throttle: Option<ThrottleFuture>,
+    /// Bytes read from `inner` but not yet released to the caller.
+    pending: Vec<u8>,
+    /// How much of `pending` has already been handed over.
+    released: usize,
 }
 
 impl<S> RateLimitedStream<S> {
@@ -38,7 +47,25 @@ impl<S> RateLimitedStream<S> {
             inner,
             limiter,
             throttle: None,
+            pending: Vec::new(),
+            released: 0,
         }
+    }
+
+    /// Hand buffered bytes to the caller, returning true if any were released.
+    fn drain_pending(&mut self, buf: &mut ReadBuf<'_>) -> bool {
+        let available = &self.pending[self.released..];
+        if available.is_empty() {
+            return false;
+        }
+        let take = available.len().min(buf.remaining());
+        buf.put_slice(&available[..take]);
+        self.released += take;
+        if self.released == self.pending.len() {
+            self.pending.clear();
+            self.released = 0;
+        }
+        take > 0
     }
 }
 
@@ -59,8 +86,12 @@ impl<S: AsyncRead + Unpin> AsyncRead for RateLimitedStream<S> {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
-        // Serve an outstanding throttle before pulling more data. Leaving the
-        // read unpolled is what applies backpressure to the peer.
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Settle any outstanding debt first. Leaving the inner read unpolled is
+        // what applies backpressure to the peer.
         if let Some(throttle) = this.throttle.as_mut() {
             match throttle.as_mut().poll(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -68,27 +99,63 @@ impl<S: AsyncRead + Unpin> AsyncRead for RateLimitedStream<S> {
             }
         }
 
-        let before = buf.filled().len();
-        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
-        if !matches!(result, Poll::Ready(Ok(()))) {
-            return result;
+        // Paid-for bytes from an earlier read, or a remainder that did not fit
+        // the caller's buffer.
+        if this.drain_pending(buf) {
+            return Poll::Ready(Ok(()));
         }
 
-        let read = buf.filled().len() - before;
+        // Read into our own buffer so the bytes can be withheld until paid for.
+        let capacity = buf.remaining();
+        this.pending.resize(capacity, 0);
+        this.released = 0;
+        let mut staged = ReadBuf::new(&mut this.pending);
+        match Pin::new(&mut this.inner).poll_read(cx, &mut staged) {
+            Poll::Pending => {
+                this.pending.clear();
+                return Poll::Pending;
+            }
+            Poll::Ready(Err(e)) => {
+                this.pending.clear();
+                return Poll::Ready(Err(e));
+            }
+            Poll::Ready(Ok(())) => {}
+        }
+        let read = staged.filled().len();
+        this.pending.truncate(read);
+
+        // EOF: nothing to meter, and the empty fill signals it to the caller.
+        if read == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         // `check_data` consumes quota when the payload fits and consumes
         // nothing when it does not, so the failing branch can hand the same
         // byte count to `throttle_data` without double-charging the session.
-        if read > 0 && this.limiter.check_data(read).is_err() {
-            let limiter = this.limiter.clone();
-            // No heartbeat callback is needed here, unlike the TCP path: QUIC
-            // carries heartbeats on a dedicated control stream, so a throttled
-            // data stream cannot stall them into a stale-session eviction.
-            this.throttle = Some(Box::pin(async move {
-                limiter.throttle_data(read, || {}).await;
-            }));
+        if this.limiter.check_data(read).is_ok() {
+            this.drain_pending(buf);
+            return Poll::Ready(Ok(()));
         }
 
-        result
+        let limiter = this.limiter.clone();
+        // No heartbeat callback is needed here, unlike the TCP path: QUIC
+        // carries heartbeats on a dedicated control stream, so a throttled
+        // data stream cannot stall them into a stale-session eviction.
+        let mut throttle: ThrottleFuture = Box::pin(async move {
+            limiter.throttle_data(read, || {}).await;
+        });
+        match throttle.as_mut().poll(cx) {
+            // Quota was already available; release without a round trip.
+            Poll::Ready(()) => {
+                this.drain_pending(buf);
+                Poll::Ready(Ok(()))
+            }
+            // Bytes stay in `pending` until the debt clears.
+            Poll::Pending => {
+                this.throttle = Some(throttle);
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -144,16 +211,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_budget_reads_delay_the_next_read_without_losing_data() {
-        // 512 B/s with no burst headroom. Charging happens after delivery, so
-        // it takes three reads to observe the delay: the first drains the
-        // bucket, the second goes over and arms the throttle, and the third
-        // pays for it by waiting for quota to refill.
+    async fn over_budget_reads_are_delayed_without_losing_data() {
+        // 512 B/s with no burst headroom: the first read empties the bucket and
+        // the second cannot be served until quota refills.
         let (mut peer, inner) = duplex(4096);
-        peer.write_all(&[7u8; 1536]).await.unwrap();
+        peer.write_all(&[7u8; 1024]).await.unwrap();
 
         let mut stream = RateLimitedStream::new(inner, limiter(512, 1));
-        let mut chunks = [vec![0u8; 512], vec![0u8; 512], vec![0u8; 512]];
+        let mut chunks = [vec![0u8; 512], vec![0u8; 512]];
 
         let start = Instant::now();
         for chunk in &mut chunks {
@@ -172,6 +237,56 @@ mod tests {
                 "read {i} returned corrupted data"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_single_over_budget_read_is_paid_for_before_delivery() {
+        // The case a release-then-settle-up design cannot cap, and the shape
+        // the ingress actually produces: read exactly the expected body, then
+        // drop the stream. There is no later poll to collect the debt on, so
+        // the bytes must be paid for before they are handed over or the cap
+        // does not hold at all.
+        let (mut peer, inner) = duplex(8192);
+        peer.write_all(&[9u8; 1024]).await.unwrap();
+
+        // 512 B/s, burst 1x: a 1 KiB read is twice the whole bucket.
+        let mut stream = RateLimitedStream::new(inner, limiter(512, 1));
+        let mut body = vec![0u8; 1024];
+
+        let start = Instant::now();
+        stream.read_exact(&mut body).await.unwrap();
+        let elapsed = start.elapsed();
+        drop(stream);
+
+        assert!(body.iter().all(|&b| b == 9), "delivered data was corrupted");
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "an oversized read must be paid for before its bytes are released, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn withheld_bytes_survive_a_caller_buffer_smaller_than_the_read() {
+        // The remainder of a staged read must be handed over on later polls
+        // rather than dropped when it does not fit the caller's buffer.
+        let (mut peer, inner) = duplex(4096);
+        peer.write_all(&[4u8; 256]).await.unwrap();
+        drop(peer);
+
+        let mut stream = RateLimitedStream::new(inner, limiter(1024 * 1024, 2));
+        let mut sink = Vec::new();
+        let mut chunk = [0u8; 16];
+
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            sink.extend_from_slice(&chunk[..n]);
+        }
+
+        assert_eq!(sink.len(), 256, "every byte must be delivered exactly once");
+        assert!(sink.iter().all(|&b| b == 4), "delivered data was corrupted");
     }
 
     #[tokio::test]

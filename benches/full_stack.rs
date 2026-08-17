@@ -249,17 +249,22 @@ fn bench_multiplexer_round_trip(c: &mut Criterion) {
 
                 let start = Instant::now();
                 for _ in 0..iters {
-                    stream.write_all(&data).await.unwrap();
-                    let Ok(read) =
-                        tokio::time::timeout(ROUND_TRIP_TIMEOUT, stream.read_exact(&mut response))
-                            .await
+                    // Both halves are guarded: `write_all` pushes into a bounded
+                    // frame channel, so a stalled pump would park it before the
+                    // read is ever reached.
+                    let round_trip = async {
+                        stream.write_all(&data).await?;
+                        stream.read_exact(&mut response).await?;
+                        Ok::<(), std::io::Error>(())
+                    };
+                    let Ok(result) = tokio::time::timeout(ROUND_TRIP_TIMEOUT, round_trip).await
                     else {
                         panic!(
                             "round trip stalled after {ROUND_TRIP_TIMEOUT:?}: \
                              the loopback is no longer delivering frames"
                         )
                     };
-                    read.unwrap();
+                    result.unwrap();
                 }
                 let elapsed = start.elapsed();
 

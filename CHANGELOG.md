@@ -56,9 +56,18 @@ cancellation, and ingress timeout configuration.
 - Enforce per-session rate limits on the QUIC data path. QUIC sessions were
   given a rate limiter that nothing consulted: unlike TCP, QUIC maps each stream
   to its own connection-level stream, so its traffic never reaches the frame
-  loop where the budget is applied. Stream opens and the inbound byte rate are
-  now metered as streams are opened, matching TCP behaviour, so a configured
-  limit applies on both transports rather than silently only on one.
+  loop where the byte budget is applied. QUIC streams now carry that budget, and
+  over-budget data is delayed rather than dropped.
+- Apply `rate_limits.streams_per_sec` to the streams the ingress opens, on both
+  transports. The frame loop only ever saw `OpenStream` frames sent by the
+  tunnel client, and the ingress opens its streams in the other direction, so
+  the setting had no effect on request-driven traffic.
+
+  **Operators should check this value before upgrading.** It defaults to 100
+  streams per second with a burst factor of 2, and the HTTP ingress opens one
+  stream per request, so a session sustaining more than roughly 100 requests per
+  second will now be limited where it previously was not. Raise
+  `streams_per_sec` to suit the workload.
 - Complete the `multiplexer_round_trip` benchmark group, which could not finish
   and left `cargo bench --bench full_stack` hanging
   ([#174](https://github.com/ferro-labs/ferrotunnel/issues/174)).

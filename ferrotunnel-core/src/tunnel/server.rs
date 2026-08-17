@@ -342,15 +342,22 @@ impl TunnelServer {
                     }
                 });
 
+                // The limiter is shared with the multiplexer so the ingress's own
+                // stream opens are metered too: `process_messages` only sees
+                // `OpenStream` frames sent by the client, never the ones the
+                // ingress opens on its behalf.
+                let rate_limiter = SessionRateLimiter::new(&rate_limits.into());
                 let session = Session::new(
                     session_id,
                     tunnel_id.clone(),
                     addr,
                     token,
                     capabilities,
-                    Some(AnyMultiplexer::Tcp(multiplexer.clone())),
+                    Some(AnyMultiplexer::Tcp(
+                        multiplexer.clone().with_rate_limiter(rate_limiter.clone()),
+                    )),
                 )
-                .with_rate_limiter(SessionRateLimiter::new(&rate_limits.into()));
+                .with_rate_limiter(rate_limiter);
 
                 if let Err(e) = sessions.add(session) {
                     warn!("Failed to register session: {}", e);
