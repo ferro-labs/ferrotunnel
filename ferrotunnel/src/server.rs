@@ -397,8 +397,9 @@ impl ServerBuilder {
 
     /// Configure per-session rate limits (stream-open and byte rates).
     ///
-    /// Defaults to [`RateLimitConfig::default`]. All rate-limit values must be
-    /// greater than zero.
+    /// Defaults to [`RateLimitConfig::default`]. Every value must be non-zero,
+    /// and `bytes_per_sec` must fit in a `u32`, which is what the limiter
+    /// counts in.
     #[must_use]
     pub fn rate_limits(mut self, limits: &RateLimitConfig) -> Self {
         self.config.rate_limits = limits.clone();
@@ -439,7 +440,8 @@ impl ServerBuilder {
     ///
     /// Returns an error if required configuration is missing or invalid:
     /// - `token` must be set
-    /// - all rate-limit values must be greater than zero
+    /// - every rate-limit value must be non-zero, with `bytes_per_sec` no
+    ///   greater than `u32::MAX`
     /// - `http_response_timeout` must be greater than zero
     pub fn build(self) -> Result<Server> {
         self.config.validate()?;
@@ -570,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_server_builder_rejects_zero_rate_limits() {
+    fn test_server_builder_rejects_invalid_rate_limits() {
         let cases = [
             (
                 "streams_per_sec",
@@ -593,6 +595,13 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            (
+                "bytes_per_sec",
+                RateLimitConfig {
+                    bytes_per_sec: u64::from(u32::MAX) + 1,
+                    ..Default::default()
+                },
+            ),
         ];
 
         for (field, rate_limits) in cases {
@@ -600,7 +609,7 @@ mod tests {
                 .token("secret")
                 .rate_limits(&rate_limits)
                 .build()
-                .expect_err("zero rate-limit values must be rejected");
+                .expect_err("rate-limit values outside the representable range must be rejected");
             assert!(
                 err.to_string().contains(field),
                 "error should identify {field}: {err}"

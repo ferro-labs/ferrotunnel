@@ -205,6 +205,7 @@ impl TunnelServer {
 
     pub async fn run(mut self) -> Result<()> {
         crate::limits::validate_limits(&self.limits_config)?;
+        crate::limits::validate_rate_limits(&self.rate_limits)?;
         let listener = TcpListener::bind(self.addr).await?;
         info!("Server listening on {}", self.addr);
 
@@ -505,6 +506,7 @@ impl TunnelServer {
     /// on different ports.
     pub async fn run_quic(mut self, quic_addr: SocketAddr) -> Result<()> {
         crate::limits::validate_limits(&self.limits_config)?;
+        crate::limits::validate_rate_limits(&self.rate_limits)?;
         let quic_config = match &self.transport_config {
             TransportConfig::Quic(c) => c.clone(),
             _ => {
@@ -914,6 +916,27 @@ mod tests {
             TunnelError::Timeout(msg) if msg.contains("server handshake timed out")
         ));
         assert_eq!(limits.available_sessions(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_rejects_unrepresentable_rate_limits_before_binding() {
+        // Port 0 would bind successfully, so reaching an error at all proves
+        // validation runs ahead of the listener rather than after it.
+        let server = TunnelServer::new("127.0.0.1:0".parse().unwrap(), "token".to_string())
+            .with_rate_limits(RateLimitConfig {
+                bytes_per_sec: u64::from(u32::MAX) + 1,
+                ..Default::default()
+            });
+
+        let err = server
+            .run()
+            .await
+            .expect_err("a byte rate the limiter cannot represent must be rejected");
+
+        assert!(
+            matches!(err, TunnelError::Config(ref msg) if msg.contains("bytes_per_sec")),
+            "error should identify the field: {err}"
+        );
     }
 
     #[tokio::test]

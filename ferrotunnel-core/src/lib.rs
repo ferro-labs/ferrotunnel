@@ -8,6 +8,6 @@ pub mod transport;
 pub mod tunnel;
 
 // Re-export specific items for convenience
-pub use limits::validate_limits;
+pub use limits::{validate_limits, validate_rate_limits};
 pub use tunnel::client::TunnelClient;
 pub use tunnel::server::TunnelServer;
