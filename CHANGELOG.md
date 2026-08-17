@@ -18,15 +18,18 @@ cancellation, and ingress timeout configuration.
   (`FERROTUNNEL_HTTP_RESPONSE_TIMEOUT`), so deployments of the shipped binary can
   serve upstreams that legitimately take longer than the 60s default. The timeout
   bounds both the response head and stalls between streamed body frames
-  ([#172](https://github.com/ferro-labs/ferrotunnel/issues/172)).
+  ([#172](https://github.com/ferro-labs/ferrotunnel/issues/172),
+  [`9202301`](https://github.com/ferro-labs/ferrotunnel/commit/92023013d7f78299b8b99b3dda1529d5e3ff2c37)).
 - Configure the same timeout from the library through
   `ServerBuilder::http_response_timeout`, and from `Http3IngressConfig` through a
   matching builder method. Both ingress construction paths now read it, where they
   previously used a hardcoded 60s
-  ([#172](https://github.com/ferro-labs/ferrotunnel/issues/172)).
+  ([#172](https://github.com/ferro-labs/ferrotunnel/issues/172),
+  [`9202301`](https://github.com/ferro-labs/ferrotunnel/commit/92023013d7f78299b8b99b3dda1529d5e3ff2c37)).
 - Apply per-session rate limits configured through `Server::builder()`. The
   `rate_limits` setting was previously accepted and never reached the tunnel
-  server ([#167](https://github.com/ferro-labs/ferrotunnel/issues/167)).
+  server ([#167](https://github.com/ferro-labs/ferrotunnel/issues/167),
+  [`e2e57de`](https://github.com/ferro-labs/ferrotunnel/commit/e2e57dee55dbc0dd53e82db3bfb0487f2f3a69f4)).
 
 ### Fixed
 
@@ -34,13 +37,16 @@ cancellation, and ingress timeout configuration.
   the byte-rate quota are now delayed and delivered, waiting for quota in bounded
   chunks with the session heartbeat refreshed between them, so a slow session is
   never evicted as stale
-  ([#167](https://github.com/ferro-labs/ferrotunnel/issues/167)).
+  ([#167](https://github.com/ferro-labs/ferrotunnel/issues/167),
+  [`e2e57de`](https://github.com/ferro-labs/ferrotunnel/commit/e2e57dee55dbc0dd53e82db3bfb0487f2f3a69f4)).
 - Stop losing frames when a send or receive is cancelled by a timeout, which
   could corrupt a stream mid-transfer
-  ([#168](https://github.com/ferro-labs/ferrotunnel/issues/168)).
+  ([#168](https://github.com/ferro-labs/ferrotunnel/issues/168),
+  [`d852b28`](https://github.com/ferro-labs/ferrotunnel/commit/d852b280a1fba7f56a6c7e7698cfd01930814a7b)).
 - Reject zero-valued rate limits at `build()` instead of silently treating them
   as `1`, the most restrictive setting available, for a value that reads as
-  disabled ([#171](https://github.com/ferro-labs/ferrotunnel/issues/171)).
+  disabled ([#171](https://github.com/ferro-labs/ferrotunnel/issues/171),
+  [`d59f14f`](https://github.com/ferro-labs/ferrotunnel/commit/d59f14fe6d7f0d656c90bb6f5876843903c0f4fc)).
 - Reject a `bytes_per_sec` above `u32::MAX` rather than clamping it to roughly
   4.29 GB/s. The limiter counts in `u32` cells, so an out-of-range rate now fails
   at startup instead of throttling sessions below the configured value. Both
