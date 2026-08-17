@@ -1,5 +1,4 @@
 #![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
 #![allow(clippy::cast_possible_truncation)]
 
 //! Full-stack end-to-end benchmarks
@@ -214,17 +213,19 @@ fn bench_multiplexer_round_trip(c: &mut Criterion) {
             pump(server_rx, Arc::clone(&client_mux)),
         ];
 
+        // The client opens exactly one stream, so echo inline rather than
+        // spawning per accepted stream. A detached echo task would outlive the
+        // abort below: once the pumps stop, its read parks forever instead of
+        // seeing EOF, leaking a task and its buffer for every sample.
         tasks.push(tokio::spawn(async move {
             while let Ok(mut stream) = server_accept.recv().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 65536];
-                    while let Ok(n) = stream.read(&mut buf).await {
-                        if n == 0 {
-                            break;
-                        }
-                        stream.write_all(&buf[..n]).await.unwrap();
+                let mut buf = vec![0u8; 65536];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        break;
                     }
-                });
+                    stream.write_all(&buf[..n]).await.unwrap();
+                }
             }
         }));
 
@@ -249,10 +250,16 @@ fn bench_multiplexer_round_trip(c: &mut Criterion) {
                 let start = Instant::now();
                 for _ in 0..iters {
                     stream.write_all(&data).await.unwrap();
-                    tokio::time::timeout(ROUND_TRIP_TIMEOUT, stream.read_exact(&mut response))
-                        .await
-                        .expect("round trip stalled: the loopback is no longer delivering frames")
-                        .unwrap();
+                    let Ok(read) =
+                        tokio::time::timeout(ROUND_TRIP_TIMEOUT, stream.read_exact(&mut response))
+                            .await
+                    else {
+                        panic!(
+                            "round trip stalled after {ROUND_TRIP_TIMEOUT:?}: \
+                             the loopback is no longer delivering frames"
+                        )
+                    };
+                    read.unwrap();
                 }
                 let elapsed = start.elapsed();
 
