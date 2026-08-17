@@ -53,6 +53,12 @@ cancellation, and ingress timeout configuration.
   `ServerBuilder::build` and `TunnelServer::run` validate, closing the path that
   bypassed validation entirely
   ([#176](https://github.com/ferro-labs/ferrotunnel/issues/176)).
+- Enforce per-session rate limits on the QUIC data path. QUIC sessions were
+  given a rate limiter that nothing consulted: unlike TCP, QUIC maps each stream
+  to its own connection-level stream, so its traffic never reaches the frame
+  loop where the budget is applied. Stream opens and the inbound byte rate are
+  now metered as streams are opened, matching TCP behaviour, so a configured
+  limit applies on both transports rather than silently only on one.
 - Complete the `multiplexer_round_trip` benchmark group, which could not finish
   and left `cargo bench --bench full_stack` hanging
   ([#174](https://github.com/ferro-labs/ferrotunnel/issues/174)).

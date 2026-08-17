@@ -665,8 +665,15 @@ impl TunnelServer {
                     capabilities,
                 } = auth;
 
-                // Create QUIC multiplexer for data streams
-                let quic_mux = QuicMultiplexer::new(connection.clone(), false);
+                // Create QUIC multiplexer for data streams.
+                //
+                // The limiter is shared with the multiplexer, not just stored on
+                // the session: QUIC data never reaches `process_messages`, so
+                // `AnyMultiplexer::open_stream` is the only place the budget can
+                // be applied to this transport.
+                let rate_limiter = SessionRateLimiter::new(&rate_limits.into());
+                let quic_mux = QuicMultiplexer::new(connection.clone(), false)
+                    .with_rate_limiter(rate_limiter.clone());
 
                 let session = Session::new(
                     session_id,
@@ -676,7 +683,7 @@ impl TunnelServer {
                     capabilities,
                     Some(AnyMultiplexer::Quic(quic_mux.clone())),
                 )
-                .with_rate_limiter(SessionRateLimiter::new(&rate_limits.into()));
+                .with_rate_limiter(rate_limiter);
 
                 if let Err(e) = sessions.add(session) {
                     warn!("Failed to register QUIC session: {}", e);
