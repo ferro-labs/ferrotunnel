@@ -23,7 +23,7 @@ prometheus = { version = "0.14", features = ["process"] }
 # Tracing & OpenTelemetry
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.33"
 opentelemetry = { version = "0.31" }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
