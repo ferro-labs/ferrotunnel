@@ -34,7 +34,7 @@ rustls-pki-types = { version = "1.9", features = ["std"] }
 # Auth hardening
 thiserror = { workspace = true }
 subtle = "2"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Rate limiting
 governor = "0.10"
